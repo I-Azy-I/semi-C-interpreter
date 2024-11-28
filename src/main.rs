@@ -18,7 +18,7 @@ use env_logger::{Logger, Env};
 use lang_c::ast::{ArrayDeclarator, ArraySize, BinaryOperator, BinaryOperatorExpression, Constant, DerivedDeclarator, FloatBase, IntegerBase, UnaryOperator, UnaryOperatorExpression};
 use crate::ErrorInterpreter::*;
 
-const STACK_SIZE: usize = 10;
+const STACK_SIZE: usize = 20;
 #[derive(Debug)]
 enum ErrorInterpreter{
     NotImplemented,
@@ -58,6 +58,7 @@ enum ErrorInterpreter{
     MultipleDimensionArrayNotImplemented,
     MultiplePointerNotImplemented,
     NoIdentifierCanBeExtract,
+    NotAPointer,
 }
 type Int = i64;
 type Float = f64;
@@ -66,11 +67,12 @@ enum MemoryValue {
     Int(i64),
     Float(f64),
     Char(char),
-    Array(SpecifierInterpreter,Vec<MemoryValue>),
+    //Array(SpecifierInterpreter,Vec<MemoryValue>),
     Pointer(SpecifierInterpreter,usize),
     Null,
     Unit
 }
+
 impl MemoryValue {
     fn same_type_specifier(&self, specifier: &SpecifierInterpreter) -> bool {
         match (self, specifier) {
@@ -80,6 +82,7 @@ impl MemoryValue {
             _ => false
         }
     }
+    
     
 }
 struct Value{
@@ -92,8 +95,7 @@ impl Value {
         match (&self.value, specifier) {
             (MemoryValue::Int(_), SpecifierInterpreter::Int) => true,
             (MemoryValue::Float(_), SpecifierInterpreter::Float) => true,
-            (MemoryValue::Array(spec_value, _), SpecifierInterpreter::Array(spec_spec)) => *spec_value == **spec_spec,
-            // Pointer and Array don't have corresponding specifiers in the given enum
+            //(MemoryValue::Array(spec_value, _), SpecifierInterpreter::Array(spec_spec)) => *spec_value == **spec_spec,
             (MemoryValue::Pointer(pointer_type_value, _), SpecifierInterpreter::Pointer(pointer_type_spec)) => *pointer_type_value == **pointer_type_spec,
             _ => false
         }
@@ -106,7 +108,7 @@ enum SpecifierInterpreter {
     Int,
     Float,
     Void,
-    Array(Box<SpecifierInterpreter>),
+    //Array(Box<SpecifierInterpreter>),
     Pointer(Box<SpecifierInterpreter>)
 }
 
@@ -317,19 +319,20 @@ impl MemoryManager{
         }
         None
     }
-    fn get_value(&self, identifier: &IdentifierData) -> Option<MemoryValue> {
+    fn get_value(&self, identifier: &Identifier) -> Option<MemoryValue> {
         debug!("MEMORY_STATE_BEFORE GET {:?}", identifier);
         debug!("{}", self.build_state());
-        if let Some(index) = self.get_index(&identifier.identifier) {
+        if let Some(index) = self.get_index(&identifier) {
             let value = self.memory.get(index);
             match value{
+                /*
                 MemoryValue::Array(type_element, array) => {
                     if let Some(array_index) = identifier.array_index {
                         Some(array[array_index].clone())
                     }else{
                         Some(value.clone())
                     }
-                }
+                }*/
                 _ => Some(value.clone())
             }
         }else{
@@ -337,7 +340,7 @@ impl MemoryManager{
         }
     }
 
-    fn create_value(&mut self, identifier: &Identifier, value: MemoryValue) {
+    fn create_value(&mut self, identifier: &Identifier, value: MemoryValue) -> MemoryIndex{
         debug!("MEMORY_STATE_BEFORE CREATE {:?} {:?}", identifier, value);
         debug!("{}", self.build_state());
         let memory_id = self.memory.add(value);
@@ -346,12 +349,14 @@ impl MemoryManager{
         debug!("{}", self.build_state());
         debug!("SYMBOL TABLES");
         debug!("{:?}", self.symbol_tables);
+        memory_id
     }
-    fn change_value(&mut self, identifier: &IdentifierData, value: MemoryValue) -> Option<()> {
+    fn change_value(&mut self, identifier: &Identifier, value: MemoryValue) -> Option<()> {
         debug!("MEMORY_STATE_BEFORE CHANGE {:?} {:?}", identifier, value);
         debug!("{}", self.build_state());
-        if let Some(index) = self.get_index(&identifier.identifier) {
+        if let Some(index) = self.get_index(&identifier) {
             match self.memory.get_mut(index) {
+                /*
                 MemoryValue::Array(elements_type, array) => {
                     if let Some(array_index) = identifier.array_index {
                         array[array_index] = value;
@@ -363,7 +368,7 @@ impl MemoryManager{
                         debug!("{}", self.build_state());
                         None
                     }
-                }
+                }*/
                 mem_value => {
                     *mem_value = value;
                     debug!("MEMORY_STATE_AFTER CHANGE");
@@ -377,6 +382,33 @@ impl MemoryManager{
             None
         }
         
+    }
+    fn set_to_index(&mut self, memory_index: MemoryIndex, value: MemoryValue) { 
+        debug!("MEMORY_STATE_BEFORE SET_INDEX {:?}", memory_index);
+        debug!("{}", self.build_state());
+        self.memory.change(memory_index, value);
+        debug!("MEMORY_STATE_AFTER SET_INDEX");
+        debug!("{}", self.build_state());
+    }
+
+    fn get_from_index(&mut self, memory_index: MemoryIndex) -> MemoryValue {
+        debug!("MEMORY_STATE_BEFORE SET_INDEX {:?}", memory_index);
+        debug!("{}", self.build_state());
+        let v = self.memory.get(memory_index);
+        debug!("MEMORY_STATE_AFTER SET_INDEX");
+        debug!("{}", self.build_state());
+        v.clone()
+    }
+    
+    fn add_array(&mut self, default_value: MemoryValue, size: usize) -> MemoryIndex{
+        debug!("MEMORY_STATE_BEFORE ADD ARRAY {:?} {}", default_value, size);
+        debug!("{}", self.build_state());
+        let index = self.memory.add(default_value.clone());
+        for i in 1..size{
+            self.set_to_index(i + index, default_value.clone());
+        };
+        self.memory.stack_pointer += size-1;
+        index
     }
 
     fn free_scope(&mut self) {
@@ -396,7 +428,7 @@ impl MemoryManager{
                 MemoryValue::Int(value) => { format!("{}", value) },
                 MemoryValue::Float(value) => {format!("{}", value)}
                 MemoryValue::Char(value) => {format!("{}", value)}
-                MemoryValue::Array(type_array, array) => {format!("type: {:?}, content: {:?}", type_array, array)}
+                //MemoryValue::Array(type_array, array) => {format!("type: {:?}, content: {:?}", type_array, array)}
                 MemoryValue::Pointer(type_pointer, pointer) => {format!("type: {:?}, content: {:?}", type_pointer, pointer)}
                 MemoryValue::Null => { "null".to_string()},
                 MemoryValue::Unit => { "unit".to_string()},
@@ -429,7 +461,7 @@ fn get_function_name(function_def: &ast::FunctionDefinition) -> Result<Identifie
     extract_identifier_from_declarator(&declarator)
 }
 
-fn get_function_arguments(function_def: &ast::FunctionDefinition) -> Result<Vec<FunctionArgument>,ErrorInterpreter>{
+fn get_function_arguments(function_def: &ast::FunctionDefinition) -> Result<Vec<FunctionArgument>, ErrorInterpreter>{
     let declarator = &function_def.declarator.node;
     let nodes_arg = &declarator.derived;
     if nodes_arg.len() != 1{
@@ -522,6 +554,40 @@ impl Interpreter {
             return_called: false,
         }
     }
+    fn get_value(&self, identifier: &Identifier) -> Result<MemoryValue, ErrorInterpreter> {
+        if let Some(value) = self.memory_manager.get_value(&identifier){
+            Ok(value)
+        }else{
+            error!("Impossible to get variable {}", identifier.clone());
+            Err(IdentifierNotFoundInMemory(identifier.clone()))
+        }
+    }
+    fn get_index(&mut self, identifier: &Identifier) -> Result<MemoryIndex, ErrorInterpreter> {
+        if let Some(value) = self.memory_manager.get_index(&identifier){
+            Ok(value)
+        }else{
+            error!("Impossible to get variable {}", identifier.clone());
+            Err(IdentifierNotFoundInMemory(identifier.clone()))
+        }
+    }
+    fn get_value_from_pointer(&mut self, identifier: &Identifier, offset: usize) -> Result<MemoryValue, ErrorInterpreter> {
+        let inside_value_pointer = self.get_value(&identifier)?;
+        let pointer_address = match inside_value_pointer{
+            MemoryValue::Pointer(_, address) => address,
+            _ => return Err(NotAPointer)
+        };
+        Ok(self.memory_manager.get_from_index(pointer_address+offset))
+    }
+
+    fn set_value_inside_pointer(&mut self, identifier: &Identifier, offset: usize, value: MemoryValue) -> Result<(), ErrorInterpreter> {
+        let inside_value_pointer = self.get_value(identifier)?;
+        let pointer_address = match inside_value_pointer{
+            MemoryValue::Pointer(_, address) => address,
+            _ => return Err(NotAPointer)
+        };
+        self.memory_manager.set_to_index(pointer_address+offset, value);
+        Ok(())
+    }
     fn execute_functions(&mut self, function_identifier: Identifier, variables: Vec<Identifier>) -> Result<MemoryValue, ErrorInterpreter> {
         // fetch function data
         let (_, function_arguments, body) = self.functions.get(&function_identifier)
@@ -536,11 +602,7 @@ impl Interpreter {
             for ((_, argument_specifier), given_variable_identifier) in function_arguments.iter().zip(&variables) {
                 // check if can get variable from memory
                 let given_variable_identifier_data = IdentifierData::from_identifier(given_variable_identifier.clone());
-                let variable_data = if let Some(variable_data) = self.memory_manager.get_value(&given_variable_identifier_data){
-                    variable_data
-                }else {
-                    return Err(IdentifierNotFoundInMemory(format!("When calling {}, identifier {} not founded in memory", function_identifier.clone(), given_variable_identifier.clone())));
-                };
+                let variable_data = self.get_value(&given_variable_identifier_data.identifier)?;
                 // check if it has correct type
                 if !variable_data.same_type_specifier(argument_specifier){
                     return Err(IncorrectTypeOfArguments(format!("Incorrect type of argument {}, expected {:?}, found {:?}", function_identifier.clone(), argument_specifier.clone(), variable_data)));
@@ -557,11 +619,7 @@ impl Interpreter {
                     continue
                 };
                 let given_variable_identifier_data = IdentifierData::from_identifier(given_variable_identifier.clone());
-                let variable_data = if let Some(variable_data) = self.memory_manager.get_value(&given_variable_identifier_data){
-                    variable_data
-                }else {
-                    return Err(IdentifierNotFoundInMemory(format!("When calling {}, identifier {} not founded in memory", function_identifier.clone(), given_variable_identifier.clone())));
-                };
+                let variable_data= self.get_value(&given_variable_identifier_data.identifier)?;
                 self.memory_manager.create_value(argument_identifier, variable_data.clone());
             }
         }else { 
@@ -617,6 +675,14 @@ impl Interpreter {
                 eprintln!("{:?}", err);
                 MemoryValue::Unit
             }
+        }
+    }
+    
+    fn get_pointer_content(&mut self, memory_index: MemoryIndex) -> Result<MemoryValue, ErrorInterpreter> {
+        let memory_value = self.memory_manager.get_from_index(memory_index);
+        match memory_value{
+            MemoryValue::Pointer(_, new_pointer) => self.get_pointer_content(new_pointer),
+            _ => Ok(memory_value),
         }
     }
 
@@ -737,7 +803,24 @@ impl Interpreter {
             _ => Err(NoIdentifierCanBeExtract)
         } 
     }
+    fn get_operand_value(&mut self, lhs: &IdentifierData) -> Result<MemoryValue, ErrorInterpreter> {
+        match lhs.array_index {
+            Some(index) => self.get_value_from_pointer(&lhs.identifier, index),
+            None => self.get_value(&lhs.identifier),
+        }
+    }
+    fn store_operand_result(&mut self, lhs: &IdentifierData, result: MemoryValue) -> Result<(), ErrorInterpreter>  {
+        match lhs.array_index {
+            Some(index) => self.set_value_inside_pointer(&lhs.identifier, index, result),
+            None => {
+                self.memory_manager.change_value(&lhs.identifier, result);
+                Ok(())
+            }
+        }
+    }
     fn binary_operator_expression_value(&mut self, binary_operator_expression_node: &Node<BinaryOperatorExpression>) -> Result<MemoryValue, ErrorInterpreter> {
+
+
         debug!("binary_operator_expression_value");
         let binary_operator_expression = &binary_operator_expression_node.node;
         match binary_operator_expression.operator.node{
@@ -745,22 +828,16 @@ impl Interpreter {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
                 match (&lhs, rhs) {
-                    (MemoryValue::Array(_, arr), MemoryValue::Int(v)) => {
-                        let index = v as usize;
-                        arr.get(index)
-                            .cloned()
-                            .ok_or_else(|| {
-                                error!("Index out of bound");
-                                IndexOutOfBounds
-                            })
+                    (MemoryValue::Pointer(_, index), MemoryValue::Int(v)) => {
+                        self.get_pointer_content(index + v as usize)
                     }
-                    (MemoryValue::Array(_,_), _) => {
+                    (MemoryValue::Pointer(_,_), _) => {
                         error!("BinaryOperatorExpression rhs is not a valid index");
                         Err(IncorrectTypeBinaryOperation("Invalid index type".into()))
                     }
                     _ => {
                         println!("{:#?}", lhs);
-                        error!("BinaryOperatorExpression lhs is not an array");
+                        error!("BinaryOperatorExpression lhs is not a pointer");
                         Err(IncorrectTypeBinaryOperation("Not an array".into()))
                     }
                 }
@@ -955,14 +1032,17 @@ impl Interpreter {
             BinaryOperator::Assign => {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
-                self.memory_manager.change_value(&lhs, rhs);
+                if let Some(array_index) = lhs.array_index{
+                    self.set_value_inside_pointer(&lhs.identifier, array_index, rhs)?;
+                }else{
+                    self.memory_manager.change_value(&lhs.identifier, rhs);
+                }
                 Ok(MemoryValue::Unit)
             }
             BinaryOperator::AssignMultiply => {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
-                let current = self.memory_manager.get_value(&lhs)
-                    .ok_or(IdentifierNotFoundInMemory(format!("{:?}",lhs.clone())))?;
+                let current = self.get_operand_value(&lhs)?;
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => MemoryValue::Int(l * r),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) => MemoryValue::Float(l * r),
@@ -970,14 +1050,14 @@ impl Interpreter {
                     (MemoryValue::Int(l), MemoryValue::Float(r)) => MemoryValue::Float(l as f64 * r),
                     _ => return Err(InvalidMultiplication)
                 };
-                self.memory_manager.change_value(&lhs, result);
+                self.store_operand_result(&lhs, result)?;
                 Ok(MemoryValue::Unit)
-            }
+            },
+
             BinaryOperator::AssignDivide => {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
-                let current =  self.memory_manager.get_value(&lhs)
-                    .ok_or(IdentifierNotFoundInMemory(format!("{:?}",lhs.clone())))?;
+                let current = self.get_operand_value(&lhs)?;
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) if r != 0 => MemoryValue::Int(l / r),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) if r != 0.0 => MemoryValue::Float(l / r),
@@ -986,31 +1066,31 @@ impl Interpreter {
                     (_, MemoryValue::Float(0.0)) => return Err(DivisionByZero),
                     _ => return Err(InvalidDivision)
                 };
-                self.memory_manager.change_value(&lhs, result);
+                self.store_operand_result(&lhs, result)?;
                 Ok(MemoryValue::Unit)
-            }
+            },
+
             BinaryOperator::AssignModulo => {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
-                let current =  self.memory_manager.get_value(&lhs)
-                    .ok_or(IdentifierNotFoundInMemory(format!("{:?}",lhs.clone())))?;
+                let current = self.get_operand_value(&lhs)?;
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) if r != 0 => MemoryValue::Int(l % r),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) if r != 0.0 => MemoryValue::Float(l % r),
                     (MemoryValue::Float(l), MemoryValue::Int(r)) if r != 0 => MemoryValue::Float(l % r as f64),
                     (MemoryValue::Int(l), MemoryValue::Float(r)) if r != 0.0 => MemoryValue::Float(l as f64 % r),
-                    (_, MemoryValue::Int(0))  => return Err(ModuloByZero),
-                    (_, MemoryValue::Float(0.0))  => return Err(ModuloByZero),
+                    (_, MemoryValue::Int(0)) => return Err(ModuloByZero),
+                    (_, MemoryValue::Float(0.0)) => return Err(ModuloByZero),
                     _ => return Err(InvalidModulo)
                 };
-                self.memory_manager.change_value(&lhs, result);
+                self.store_operand_result(&lhs, result)?;
                 Ok(MemoryValue::Unit)
-            }
+            },
+
             BinaryOperator::AssignPlus => {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
-                let current = self.memory_manager.get_value(&lhs)
-                    .ok_or(IdentifierNotFoundInMemory(format!("{:?}",lhs.clone())))?;
+                let current = self.get_operand_value(&lhs)?;
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => MemoryValue::Int(l + r),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) => MemoryValue::Float(l + r),
@@ -1018,14 +1098,14 @@ impl Interpreter {
                     (MemoryValue::Int(l), MemoryValue::Float(r)) => MemoryValue::Float(l as f64 + r),
                     _ => return Err(InvalidAddition)
                 };
-                self.memory_manager.change_value(&lhs, result);
+                self.store_operand_result(&lhs, result)?;
                 Ok(MemoryValue::Unit)
-            }
+            },
+
             BinaryOperator::AssignMinus => {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
-                let current = self.memory_manager.get_value(&lhs)
-                    .ok_or(IdentifierNotFoundInMemory(format!("{:?}",lhs.clone())))?;
+                let current = self.get_operand_value(&lhs)?;
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => MemoryValue::Int(l - r),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) => MemoryValue::Float(l - r),
@@ -1033,67 +1113,67 @@ impl Interpreter {
                     (MemoryValue::Int(l), MemoryValue::Float(r)) => MemoryValue::Float(l as f64 - r),
                     _ => return Err(InvalidSubtraction)
                 };
-                self.memory_manager.change_value(&lhs, result);
+                self.store_operand_result(&lhs, result)?;
                 Ok(MemoryValue::Unit)
-            }
+            },
+
             BinaryOperator::AssignShiftLeft => {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
-                let current = self.memory_manager.get_value(&lhs)
-                    .ok_or(IdentifierNotFoundInMemory(format!("{:?}",lhs.clone())))?;
+                let current = self.get_operand_value(&lhs)?;
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) if r >= 0 => MemoryValue::Int(l << r as u32),
                     _ => return Err(InvalidBitShift)
                 };
-                self.memory_manager.change_value(&lhs, result);
+                self.store_operand_result(&lhs, result)?;
                 Ok(MemoryValue::Unit)
-            }
+            },
+
             BinaryOperator::AssignShiftRight => {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
-                let current =  self.memory_manager.get_value(&lhs)
-                    .ok_or(IdentifierNotFoundInMemory(format!("{:?}",lhs.clone())))?;
+                let current = self.get_operand_value(&lhs)?;
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) if r >= 0 => MemoryValue::Int(l >> r as u32),
                     _ => return Err(InvalidBitShift)
                 };
-                self.memory_manager.change_value(&lhs, result);
+                self.store_operand_result(&lhs, result)?;
                 Ok(MemoryValue::Unit)
-            }
+            },
+
             BinaryOperator::AssignBitwiseAnd => {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
-                let current =  self.memory_manager.get_value(&lhs)
-                    .ok_or(IdentifierNotFoundInMemory(format!("{:?}",lhs.clone())))?;
+                let current = self.get_operand_value(&lhs)?;
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => MemoryValue::Int(l & r),
                     _ => return Err(InvalidBitwiseOperation)
                 };
-                self.memory_manager.change_value(&lhs, result);
+                self.store_operand_result(&lhs, result)?;
                 Ok(MemoryValue::Unit)
-            }
+            },
+
             BinaryOperator::AssignBitwiseXor => {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
-                let current =  self.memory_manager.get_value(&lhs)
-                    .ok_or(IdentifierNotFoundInMemory(format!("{:?}",lhs.clone())))?;
+                let current = self.get_operand_value(&lhs)?;
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => MemoryValue::Int(l ^ r),
                     _ => return Err(InvalidBitwiseOperation)
                 };
-                self.memory_manager.change_value(&lhs, result);
+                self.store_operand_result(&lhs, result)?;
                 Ok(MemoryValue::Unit)
-            }
+            },
+
             BinaryOperator::AssignBitwiseOr => {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
-                let current =  self.memory_manager.get_value(&lhs)
-                    .ok_or(IdentifierNotFoundInMemory(format!("{:?}",lhs.clone())))?;
+                let current = self.get_operand_value(&lhs)?;
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => MemoryValue::Int(l | r),
                     _ => return Err(InvalidBitwiseOperation)
                 };
-                self.memory_manager.change_value(&lhs, result);
+                self.store_operand_result(&lhs, result)?;
                 Ok(MemoryValue::Unit)
             }
         }
@@ -1161,7 +1241,7 @@ impl Interpreter {
         let expression = &expression_node.node;
         match expression {
             ast::Expression::Identifier(identifier) => {
-                if let Some(value) = self.memory_manager.get_value(&IdentifierData::from_identifier(identifier.node.name.clone())){
+                if let Some(value) = self.memory_manager.get_value(&IdentifierData::from_identifier(identifier.node.name.clone()).identifier){
                     Ok(value.clone())
                 }else{
                     Err(IdentifierNotFoundInMemory(identifier.node.name.clone()))
@@ -1237,13 +1317,16 @@ impl Interpreter {
                 return Err(MultipleDimensionArrayNotImplemented);
             }
             let local_specifier = if declarator_interpreter.array_sizes.len() == 1{
-                SpecifierInterpreter::Array(Box::new(specifier.clone()))
-            }else if declarator_interpreter.n_pointers > 0 {
-                let mut result = specifier.clone();
+                SpecifierInterpreter::Pointer(Box::new(specifier.clone()))}
+            else if declarator_interpreter.n_pointers == 1 {
+                SpecifierInterpreter::Pointer(Box::new(specifier.clone()))
+            }else if declarator_interpreter.n_pointers > 1 {
+                /*let mut result = specifier.clone();
                 for _ in 0..declarator_interpreter.n_pointers {
                     result = SpecifierInterpreter::Pointer(Box::new(result));
                 }
-                result
+                result*/
+                return Err(MultiplePointerNotImplemented)
             } else{
                 specifier.clone()
             };
@@ -1256,14 +1339,26 @@ impl Interpreter {
                 
                 self.memory_manager.create_value(&declarator_interpreter.identifier, values);
             }else{
-                let default_value = match local_specifier{
-                    SpecifierInterpreter::Int => {local_specifier.default_value()}
+                // create default value
+                let default_value = match &local_specifier{
+                    SpecifierInterpreter::Int => {
+                        local_specifier.default_value()}
                     SpecifierInterpreter::Float => {local_specifier.default_value()}
                     SpecifierInterpreter::Void => {local_specifier.default_value()}
-                    SpecifierInterpreter::Array(array_type) => Ok(MemoryValue::Array(*array_type.clone(), vec![array_type.clone().default_value()?;declarator_interpreter.array_sizes[0]] )),
-                    SpecifierInterpreter::Pointer(_) => {Err(NotImplemented)}
+                    //SpecifierInterpreter::Array(array_type) => Ok(MemoryValue::Array(*array_type.clone(), vec![array_type.clone().default_value()?;declarator_interpreter.array_sizes[0]] )),
+                    SpecifierInterpreter::Pointer(pointer_type) => {
+                        if declarator_interpreter.array_sizes.len() == 1{
+                            let default_value = pointer_type.default_value()?;
+                            let index = self.memory_manager.add_array(default_value, declarator_interpreter.array_sizes[0]);
+                            Ok(MemoryValue::Pointer(local_specifier,index))
+                        }else if declarator_interpreter.n_pointers == 1{
+                            Err(NotImplemented)
+                        }else{
+                            Err(NotImplemented)
+                        }
+                    }
                 }?;
-                self.memory_manager.create_value(&declarator_interpreter.identifier, default_value)
+                self.memory_manager.create_value(&declarator_interpreter.identifier, default_value);
             }
         };
         Ok(MemoryValue::Unit)
