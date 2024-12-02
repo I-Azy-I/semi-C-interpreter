@@ -10,14 +10,19 @@ use lang_c::span::Node;
 use std::any::{Any, TypeId};
 use std::cmp::PartialEq;
 use std::convert::identity;
+use std::fmt::format;
 use std::path::Path;
+use std::process::id;
 use std::str::FromStr;
+use std::thread::Scope;
 use lang_c::ast;
 use log::{debug, error, info, warn};
 use env_logger::{Logger, Env};
-use lang_c::ast::{ArrayDeclarator, ArraySize, BinaryOperator, BinaryOperatorExpression, Constant, DerivedDeclarator, FloatBase, IntegerBase, UnaryOperator, UnaryOperatorExpression};
+use lang_c::ast::{ArrayDeclarator, ArraySize, BinaryOperator, BinaryOperatorExpression, Constant, DerivedDeclarator, FloatBase, ForInitializer, IntegerBase, SpecifierQualifier, UnaryOperator, UnaryOperatorExpression};
+use std::mem::discriminant;
 use crate::ErrorInterpreter::*;
 
+const PRINT_MEMORY: bool = false;
 const STACK_SIZE: usize = 20;
 #[derive(Debug)]
 enum ErrorInterpreter{
@@ -47,6 +52,7 @@ enum ErrorInterpreter{
     InvalidBitwiseOperation,
     InvalidLogicalOperation,
     BaseNotSupported,
+    InvalidType(String),
     InvalidInt,
     InvalidPlusOperator,
     InvalidMinusOperator,
@@ -59,6 +65,18 @@ enum ErrorInterpreter{
     MultiplePointerNotImplemented,
     NoIdentifierCanBeExtract,
     NotAPointer,
+    HasToBeAIntOrFloatForBooleanEvaluation,
+    ImpossibleToIncrement,
+    ArraySizeLessThanOne,
+    ForConditionNotDefined,
+    ForStepNotDefined,
+    ReturnCalled(MemoryValue), //not real error but used to stop flow
+    BreakCalled, //not real error but used to stop flow
+    NotTypeSpecifierInTypeName,
+    ImpossibleToCastIntoThisType(String),
+    StringUsedAsValue,
+    InvalidNumberArgumentPrintf,
+    InvalidArgumentsForPrintf
 }
 type Int = i64;
 type Float = f64;
@@ -69,6 +87,7 @@ enum MemoryValue {
     Char(char),
     //Array(SpecifierInterpreter,Vec<MemoryValue>),
     Pointer(SpecifierInterpreter,usize),
+    String(String),
     Null,
     Unit
 }
@@ -78,12 +97,58 @@ impl MemoryValue {
         match (self, specifier) {
             (MemoryValue::Int(_), SpecifierInterpreter::Int) => true,
             (MemoryValue::Float(_), SpecifierInterpreter::Float) => true,
-            // Pointer and Array don't have corresponding specifiers in the given enum
+            (MemoryValue::Pointer(pointer_type_value,_), SpecifierInterpreter::Pointer(pointer_type_specifier)) => pointer_type_value.eq(pointer_type_specifier),
             _ => false
         }
     }
-    
-    
+    fn evaluate_boolean_value(&self) -> Result<bool, ErrorInterpreter>{
+        match self {
+            MemoryValue::Int(value) => Ok(*value != 0),
+            MemoryValue::Float(value) => Ok(*value != 0.0),
+            _=> Err(HasToBeAIntOrFloatForBooleanEvaluation)
+        }
+    }
+    fn cast(self, specifier: &SpecifierInterpreter) -> Result<MemoryValue, ErrorInterpreter> {
+        match (self, specifier) {
+            // Int conversions
+            (MemoryValue::Int(value), SpecifierInterpreter::Int) => Ok(MemoryValue::Int(value)),
+            (MemoryValue::Int(value), SpecifierInterpreter::Float) => Ok(MemoryValue::Float(value as f64)),
+            (MemoryValue::Int(value), SpecifierInterpreter::Pointer(_)) => Ok(MemoryValue::Pointer(SpecifierInterpreter::Void, value as usize)),
+
+            // Float conversions
+            (MemoryValue::Float(value), SpecifierInterpreter::Int) => Ok(MemoryValue::Int(value as i64)),
+            (MemoryValue::Float(value), SpecifierInterpreter::Float) => Ok(MemoryValue::Float(value)),
+
+            // Char conversions
+            (MemoryValue::Char(value), SpecifierInterpreter::Int) => Ok(MemoryValue::Int(value as i64)),
+            (MemoryValue::Char(value), SpecifierInterpreter::Float) => Ok(MemoryValue::Float((value as i64) as f64)),
+
+            // Pointer conversions
+            (MemoryValue::Pointer(_, addr), SpecifierInterpreter::Int) => Ok(MemoryValue::Int(addr as i64)),
+            (MemoryValue::Pointer(_, addr), SpecifierInterpreter::Pointer(new_type)) => Ok(MemoryValue::Pointer(*new_type.clone(), addr)),
+
+            // Null conversions
+            (MemoryValue::Null, SpecifierInterpreter::Int) => Ok(MemoryValue::Int(0)),
+            (MemoryValue::Null, SpecifierInterpreter::Float) => Ok(MemoryValue::Float(0.0)),
+            (MemoryValue::Null, SpecifierInterpreter::Pointer(_)) => Ok(MemoryValue::Pointer(SpecifierInterpreter::Void, 0)),
+
+            // Unit conversions
+            (MemoryValue::Unit, SpecifierInterpreter::Void) => Ok(MemoryValue::Unit),
+
+            // Catch-all for impossible conversions
+            (_, SpecifierInterpreter::Void) => Err(ImpossibleToCastIntoThisType(String::from("Void"))),
+            (MemoryValue::Float(_), SpecifierInterpreter::Pointer(_)) => Err(ImpossibleToCastIntoThisType(String::from("Pointer"))),
+            (MemoryValue::Char(_), SpecifierInterpreter::Pointer(_)) => Err(ImpossibleToCastIntoThisType(String::from("Pointer"))),
+            (MemoryValue::Pointer(_, _), SpecifierInterpreter::Float) => Err(ImpossibleToCastIntoThisType(String::from("Float"))),
+            (MemoryValue::Unit, specifier) => Err(ImpossibleToCastIntoThisType(match specifier {
+                SpecifierInterpreter::Int => String::from("Int"),
+                SpecifierInterpreter::Float => String::from("Float"),
+                SpecifierInterpreter::Pointer(_) => String::from("Pointer"),
+                SpecifierInterpreter::Void => unreachable!(),
+            })),
+            (_,_) => Err(ImpossibleToCastIntoThisType("String".parse().unwrap())),
+        }
+    }
 }
 struct Value{
     value: MemoryValue,
@@ -165,9 +230,34 @@ struct DeclaratorInterpreter {
     array_sizes: Vec<usize>,
     n_pointers: usize,
 }
+impl DeclaratorInterpreter{
+    fn to_specifier(&self, specifier: SpecifierInterpreter)-> Result<SpecifierInterpreter, ErrorInterpreter>{
+        if !self.array_sizes.is_empty()  &&  self.n_pointers > 0 {
+            return Err(InitializationArrayAndPointerImpossible);
+        } else if self.array_sizes.len() > 1{
+            return Err(MultipleDimensionArrayNotImplemented);
+        }
+        if self.array_sizes.len() == 1{
+            Ok(SpecifierInterpreter::Pointer(Box::new(specifier)))
+        }
+        else if self.n_pointers == 1 {
+            Ok(SpecifierInterpreter::Pointer(Box::new(specifier)))
+        }else if self.n_pointers > 1 {
+            /*let mut result = specifier.clone();
+            for _ in 0..declarator_interpreter.n_pointers {
+                result = SpecifierInterpreter::Pointer(Box::new(result));
+            }
+            result*/
+            return Err(MultiplePointerNotImplemented)
+        } else{
+            Ok(specifier)
+        }
+    }
+}
 enum DerivedDeclaratorInterpreter{
     Pointer,
-    Array(usize)
+    Array(usize),
+    Function,
 }
 
 type FunctionArgument = (Option<Identifier>, SpecifierInterpreter);
@@ -324,6 +414,7 @@ impl MemoryManager{
         debug!("{}", self.build_state());
         if let Some(index) = self.get_index(&identifier) {
             let value = self.memory.get(index);
+            
             match value{
                 /*
                 MemoryValue::Array(type_element, array) => {
@@ -342,7 +433,7 @@ impl MemoryManager{
 
     fn create_value(&mut self, identifier: &Identifier, value: MemoryValue) -> MemoryIndex{
         debug!("MEMORY_STATE_BEFORE CREATE {:?} {:?}", identifier, value);
-        debug!("{}", self.build_state());
+        self.print_state();
         let memory_id = self.memory.add(value);
         self.current_symbol_table_mut().save_key(identifier.clone(), memory_id);
         debug!("MEMORY_STATE_AFTER CREATE");
@@ -351,41 +442,33 @@ impl MemoryManager{
         debug!("{:?}", self.symbol_tables);
         memory_id
     }
-    fn change_value(&mut self, identifier: &Identifier, value: MemoryValue) -> Option<()> {
+    fn change_value(&mut self, identifier: &Identifier, value: MemoryValue) -> Result<MemoryValue, ErrorInterpreter> {
         debug!("MEMORY_STATE_BEFORE CHANGE {:?} {:?}", identifier, value);
-        debug!("{}", self.build_state());
+        self.print_state();
         if let Some(index) = self.get_index(&identifier) {
-            match self.memory.get_mut(index) {
-                /*
-                MemoryValue::Array(elements_type, array) => {
-                    if let Some(array_index) = identifier.array_index {
-                        array[array_index] = value;
-                        debug!("MEMORY_STATE_AFTER CHANGE");
-                        debug!("{}", self.build_state());
-                        Some(())
-                    } else {
-                        debug!("MEMORY_STATE_AFTER CHANGE");
-                        debug!("{}", self.build_state());
-                        None
-                    }
-                }*/
-                mem_value => {
-                    *mem_value = value;
-                    debug!("MEMORY_STATE_AFTER CHANGE");
-                    debug!("{}", self.build_state());
-                    Some(())
-                }
+            let old_mem_value = self.memory.get_mut(index);
+            if discriminant(old_mem_value) != discriminant(&value){
+                println!("ouaaah");
+                Err(InvalidType(format!("Impossible to change {:?} with {:?}", old_mem_value, value)))
+            }else{
+                let _old_value = old_mem_value.clone();
+                *old_mem_value = value;
+                debug!("MEMORY_STATE_AFTER CHANGE");
+                debug!("{}", self.build_state());
+                Ok(_old_value)
             }
+            
         } else {
             debug!("MEMORY_STATE_AFTER CHANGE");
             debug!("{}", self.build_state());
-            None
+            Err(IdentifierNotFoundInMemory(format!("{:?}", identifier)))
         }
         
     }
     fn set_to_index(&mut self, memory_index: MemoryIndex, value: MemoryValue) { 
         debug!("MEMORY_STATE_BEFORE SET_INDEX {:?}", memory_index);
         debug!("{}", self.build_state());
+        self.print_state();
         self.memory.change(memory_index, value);
         debug!("MEMORY_STATE_AFTER SET_INDEX");
         debug!("{}", self.build_state());
@@ -400,15 +483,20 @@ impl MemoryManager{
         v.clone()
     }
     
-    fn add_array(&mut self, default_value: MemoryValue, size: usize) -> MemoryIndex{
+    fn add_array(&mut self, default_value: MemoryValue, size: usize) -> Result<MemoryIndex, ErrorInterpreter>{
         debug!("MEMORY_STATE_BEFORE ADD ARRAY {:?} {}", default_value, size);
         debug!("{}", self.build_state());
+        if size == 0 {
+            return  Err(ArraySizeLessThanOne)
+        }
         let index = self.memory.add(default_value.clone());
         for i in 1..size{
             self.set_to_index(i + index, default_value.clone());
         };
+        
         self.memory.stack_pointer += size-1;
-        index
+        
+        Ok(index)
     }
 
     fn free_scope(&mut self) {
@@ -425,18 +513,29 @@ impl MemoryManager{
         for element in &self.memory.memory{
             res.push_str("|");
             let el: String = match element {
-                MemoryValue::Int(value) => { format!("{}", value) },
-                MemoryValue::Float(value) => {format!("{}", value)}
+                MemoryValue::Int(value) => { format!("Int: {}", value) },
+                MemoryValue::Float(value) => {format!("Float: {}", value)}
                 MemoryValue::Char(value) => {format!("{}", value)}
                 //MemoryValue::Array(type_array, array) => {format!("type: {:?}, content: {:?}", type_array, array)}
-                MemoryValue::Pointer(type_pointer, pointer) => {format!("type: {:?}, content: {:?}", type_pointer, pointer)}
+                MemoryValue::Pointer(type_pointer, pointer) => {format!("Pointer type: {:?}, address: {:?}", type_pointer, pointer)}
                 MemoryValue::Null => { "null".to_string()},
                 MemoryValue::Unit => { "unit".to_string()},
+                MemoryValue::String(string) => { format!("String: {}", string) },
             };
             res.push_str(el.clone().as_str());
         }
         res.push_str("|");
         res
+    }
+    
+    fn print_state(&self) {
+        if !PRINT_MEMORY {
+            return;
+        }
+        for table in self.symbol_tables.iter() {
+            println!("{:?}", table);
+        }
+        println!("{}", self.build_state())
     }
 }
 fn convert_node_type<T: 'static, A: 'static>(node: &Node<T>) -> Result<&A, ErrorInterpreter> {
@@ -456,74 +555,7 @@ fn is_node_of_correct_declaration<T: PartialEq + 'static, A: PartialEq + 'static
     declaration == &pattern
 }
 
-fn get_function_name(function_def: &ast::FunctionDefinition) -> Result<Identifier, ErrorInterpreter>{
-    let declarator = &function_def.declarator.node;
-    extract_identifier_from_declarator(&declarator)
-}
 
-fn get_function_arguments(function_def: &ast::FunctionDefinition) -> Result<Vec<FunctionArgument>, ErrorInterpreter>{
-    let declarator = &function_def.declarator.node;
-    let nodes_arg = &declarator.derived;
-    if nodes_arg.len() != 1{
-        warn!("Function declarator does not have exactly one argument, et t'as rien compris chef");
-        return Err(UnreachableReached);
-    }
-    let nodes_arg = &nodes_arg.iter().next().expect("Function declarator does not have exactly one argument").node;
-    
-    match nodes_arg {
-        ast::DerivedDeclarator::Function(func_declarator) => {
-            let func_declarator = &func_declarator.node;
-            let parameters = &func_declarator.parameters;
-            let mut function_args: Vec<FunctionArgument> = vec![];
-            for parameter in parameters {
-                let parameter = &parameter.node;
-                let specifier = SpecifierInterpreter::fromVecDeclaration(&parameter.specifiers)?;
-                let identifier = if let Some(declarator) = &parameter.declarator{
-                    Some(extract_identifier_from_declarator(&declarator.node)?)
-                }else {
-                    warn!("Function declarator does not have exactly an argument");
-                    None
-                };
-                function_args.push((identifier, specifier))
-            }
-            Ok(function_args)
-        }
-        _ => {
-            warn!("Bad pattern founded while fetching arguments from function");
-            Err(UnreachableReached)
-        }
-    }
-}
-fn get_function_body(function_def: &ast::FunctionDefinition) -> Result<Node<Body>,ErrorInterpreter>{
-    Ok(function_def.statement.clone())
-}
-fn get_function_data<T: 'static>(node: &Node<T>) -> Result<FunctionData, ErrorInterpreter> {
-    match TypeId::of::<T>() {
-        t if t == TypeId::of::<ast::ExternalDeclaration>() => {
-            match convert_node_type::<T, ast::ExternalDeclaration>(node)? {
-                ast::ExternalDeclaration::Declaration(_) => {
-                    Err(NotAFunction)
-                },
-                ast::ExternalDeclaration::FunctionDefinition(func) => {
-                    let function_def = &func.node;
-                    let name = get_function_name(function_def)?;
-                    let arguments = get_function_arguments(function_def)?;
-                    let body = get_function_body(function_def)?;
-                    Ok((name, arguments, body))
-                },
-                ast::ExternalDeclaration::StaticAssert(_) => {
-                    Err(NotAFunction)
-                }
-            }
-        }
-        _ => Err(NotAFunction)
-    }
-}
-fn gather_functions<T: 'static>(nodes: &Vec<Node<T>>) -> Result<Vec<FunctionData>, ErrorInterpreter> {
-    nodes.iter()
-        .map(get_function_data)
-        .collect::<Result<Vec<FunctionData>, ErrorInterpreter>>()
-}
 
 fn extract_identifier_from_declarator(declarator: &ast::Declarator) -> Result<Identifier, ErrorInterpreter>{
     let kind = &declarator.kind.node;
@@ -544,22 +576,27 @@ fn extract_identifier_from_declarator(declarator: &ast::Declarator) -> Result<Id
 struct Interpreter  {
     functions: EnvFunction,
     memory_manager: MemoryManager,
-    return_called: bool,
 }
 impl Interpreter {
     fn new() -> Self {
         Interpreter { 
             functions: EnvFunction::new(),
             memory_manager: MemoryManager::new(),
-            return_called: false,
         }
     }
-    fn get_value(&self, identifier: &Identifier) -> Result<MemoryValue, ErrorInterpreter> {
+    fn get_value_no_array(&self, identifier: &Identifier) -> Result<MemoryValue, ErrorInterpreter> {
         if let Some(value) = self.memory_manager.get_value(&identifier){
             Ok(value)
         }else{
             error!("Impossible to get variable {}", identifier.clone());
             Err(IdentifierNotFoundInMemory(identifier.clone()))
+        }
+    }
+    fn get_value(&mut self, identifier: &IdentifierData) -> Result<MemoryValue, ErrorInterpreter> {
+        if let Some(array_index) = identifier.array_index{
+            self.get_value_from_pointer(&identifier.identifier, array_index)
+        }else{
+            self.get_value_no_array(&identifier.identifier)
         }
     }
     fn get_index(&mut self, identifier: &Identifier) -> Result<MemoryIndex, ErrorInterpreter> {
@@ -571,7 +608,7 @@ impl Interpreter {
         }
     }
     fn get_value_from_pointer(&mut self, identifier: &Identifier, offset: usize) -> Result<MemoryValue, ErrorInterpreter> {
-        let inside_value_pointer = self.get_value(&identifier)?;
+        let inside_value_pointer = self.get_value_no_array(&identifier)?;
         let pointer_address = match inside_value_pointer{
             MemoryValue::Pointer(_, address) => address,
             _ => return Err(NotAPointer)
@@ -579,19 +616,99 @@ impl Interpreter {
         Ok(self.memory_manager.get_from_index(pointer_address+offset))
     }
 
-    fn set_value_inside_pointer(&mut self, identifier: &Identifier, offset: usize, value: MemoryValue) -> Result<(), ErrorInterpreter> {
-        let inside_value_pointer = self.get_value(identifier)?;
-        let pointer_address = match inside_value_pointer{
-            MemoryValue::Pointer(_, address) => address,
+    fn set_value_inside_pointer(&mut self, identifier: &Identifier, offset: usize, value: MemoryValue) -> Result<MemoryValue, ErrorInterpreter> {
+        let pointer = self.get_value_no_array(identifier)?;
+
+        let pointer_address = match pointer{
+            MemoryValue::Pointer(type_pointer, address) => {
+                if !value.same_type_specifier(&type_pointer){
+                   return  Err(InvalidType(format!("Impossible to change {:?} with {:?}", type_pointer, value)))
+                };
+                address},
             _ => return Err(NotAPointer)
         };
-        self.memory_manager.set_to_index(pointer_address+offset, value);
-        Ok(())
+        self.memory_manager.set_to_index(pointer_address + offset, value.clone());
+        Ok(value)
     }
-    fn execute_functions(&mut self, function_identifier: Identifier, variables: Vec<Identifier>) -> Result<MemoryValue, ErrorInterpreter> {
+    fn change_value(&mut self, identifier: &IdentifierData, value: MemoryValue) -> Result<MemoryValue, ErrorInterpreter> {
+        if let Some(array_index) = identifier.array_index{
+            self.set_value_inside_pointer(&identifier.identifier, array_index, value)
+        }else{
+            self.memory_manager.change_value(&identifier.identifier, value)
+        }
+    }
+    fn get_function_name(&mut self, function_def: &ast::FunctionDefinition) -> Result<Identifier, ErrorInterpreter>{
+        let declarator = &function_def.declarator;
+        Ok(self.declarator(&declarator)?.identifier)
+    }
+
+    fn get_function_arguments(&mut self, function_def: &ast::FunctionDefinition) -> Result<Vec<FunctionArgument>, ErrorInterpreter>{
+        let declarator = &function_def.declarator.node;
+        let nodes_arg = &declarator.derived;
+        if nodes_arg.len() != 1{
+            warn!("Function declarator does not have exactly one argument, et t'as rien compris chef");
+            return Err(UnreachableReached);
+        }
+        let nodes_arg = &nodes_arg.iter().next().expect("Function declarator does not have exactly one argument").node;
+
+        match nodes_arg {
+            ast::DerivedDeclarator::Function(func_declarator) => {
+                let func_declarator = &func_declarator.node;
+                let parameters = &func_declarator.parameters;
+                let mut function_args: Vec<FunctionArgument> = vec![];
+                for parameter in parameters {
+                    let parameter = &parameter.node;
+                    let specifier = SpecifierInterpreter::fromVecDeclaration(&parameter.specifiers)?;
+                    let (identifier, specifier) = if let Some(declarator) = &parameter.declarator{
+                        (Some(self.declarator(declarator)?.identifier) , self.declarator(declarator)?.to_specifier(specifier)?)
+                    }else {
+                        warn!("Function declarator does not have exactly an argument");
+                        (None, specifier)
+                    };
+                    function_args.push((identifier, specifier))
+                }
+                Ok(function_args)
+            }
+            _ => {
+                warn!("Bad pattern founded while fetching arguments from function");
+                Err(UnreachableReached)
+            }
+        }
+    }
+    fn get_function_body(&self, function_def: &ast::FunctionDefinition) -> Result<Node<Body>,ErrorInterpreter>{
+        Ok(function_def.statement.clone())
+    }
+    fn get_function_data<T: 'static>(&mut self, node: &Node<T>) -> Result<FunctionData, ErrorInterpreter> {
+        match TypeId::of::<T>() {
+            t if t == TypeId::of::<ast::ExternalDeclaration>() => {
+                match convert_node_type::<T, ast::ExternalDeclaration>(node)? {
+                    ast::ExternalDeclaration::Declaration(_) => {
+                        Err(NotAFunction)
+                    },
+                    ast::ExternalDeclaration::FunctionDefinition(func) => {
+                        let function_def = &func.node;
+                        let name = self.get_function_name(function_def)?;
+                        let arguments = self.get_function_arguments(function_def)?;
+                        let body = self.get_function_body(function_def)?;
+                        Ok((name, arguments, body))
+                    },
+                    ast::ExternalDeclaration::StaticAssert(_) => {
+                        Err(NotAFunction)
+                    }
+                }
+            }
+            _ => Err(NotAFunction)
+        }
+    }
+    fn gather_functions<T: 'static>(&mut self, nodes: &Vec<Node<T>>) -> Result<Vec<FunctionData>, ErrorInterpreter> {
+        nodes.iter()
+            .map(|node| self.get_function_data(&node))
+            .collect::<Result<Vec<FunctionData>, ErrorInterpreter>>()
+    }
+    fn execute_functions(&mut self, function_identifier: Identifier, variables: Vec<MemoryValue>) -> Result<MemoryValue, ErrorInterpreter> {
         // fetch function data
         let (_, function_arguments, body) = self.functions.get(&function_identifier)
-            .ok_or_else(|| ErrorInterpreter::FunctionNotFounded(function_identifier.clone()))?;
+            .ok_or_else(|| FunctionNotFounded(function_identifier.clone()))?;
         // if function is empty or Void just skip variable initialization
         if  !(function_arguments.len() == 0) && !(function_arguments[0].1 == SpecifierInterpreter::Void){
             // check number of arguments
@@ -599,48 +716,46 @@ impl Interpreter {
                 return Err(IncorrectTypeOfArguments(format!("Incorrect number of variables, expected: {}, got: {}", function_arguments.len(), variables.len())));
             }
             // check if variables are valid
-            for ((_, argument_specifier), given_variable_identifier) in function_arguments.iter().zip(&variables) {
-                // check if can get variable from memory
-                let given_variable_identifier_data = IdentifierData::from_identifier(given_variable_identifier.clone());
-                let variable_data = self.get_value(&given_variable_identifier_data.identifier)?;
-                // check if it has correct type
-                if !variable_data.same_type_specifier(argument_specifier){
-                    return Err(IncorrectTypeOfArguments(format!("Incorrect type of argument {}, expected {:?}, found {:?}", function_identifier.clone(), argument_specifier.clone(), variable_data)));
+            for ((_, argument_specifier), given_variable_value) in function_arguments.iter().zip(&variables) {
+                if !given_variable_value.same_type_specifier(argument_specifier){
+                    return Err(IncorrectTypeOfArguments(format!("Incorrect type of argument {}, expected {:?}, found {:?}", function_identifier.clone(), argument_specifier.clone(), given_variable_value)));
                 }
-                // add variable in local memory
             }
             self.memory_manager.push_scope(SymbolTableKind::Restricted);
 
             // add variables in the new scope
-            for ((argument_identifier, _), given_variable_identifier) in function_arguments.iter().zip(variables) {
+            for ((argument_identifier, _), variable_values) in function_arguments.iter().zip(variables) {
                 let argument_identifier = if let Some(argument_identifier) = argument_identifier {
                     argument_identifier
                 }else { 
                     continue
                 };
-                let given_variable_identifier_data = IdentifierData::from_identifier(given_variable_identifier.clone());
-                let variable_data= self.get_value(&given_variable_identifier_data.identifier)?;
-                self.memory_manager.create_value(argument_identifier, variable_data.clone());
+                self.memory_manager.create_value(argument_identifier, variable_values);
             }
         }else { 
             self.memory_manager.push_scope(SymbolTableKind::Restricted);
         }
-        let function_value = self.statement(&body.clone());
-        self.return_called = false;
+        println!("Entering function {}", function_identifier.clone());
+        let function_value = self.statement(&body.clone())
+            .or_else(|error| match error {
+                ReturnCalled(memory_value) => Ok(memory_value),
+                other => Err(other)
+            });
+        self.memory_manager.free_scope();
         function_value
-        
+       
 
     }
+   
     fn run<P: AsRef<Path>> (&mut self, file_name: P) -> MemoryValue {
         let config = Config::default();
         info!("Parsing file: {} ...", file_name.as_ref().display());
         let parse = parse(&config, file_name).expect("Error in file c");
         
         let translation_unit = parse.unit;
-        println!("{:#?}", translation_unit);
         let functions = translation_unit.0;
         info!("fetching functions...");
-        let functions_data = match gather_functions(&functions) {
+        let functions_data = match self.gather_functions(&functions) {
             Ok(functions) => {functions},
             Err(err) =>{
                 error!("An error occured while gathering data from the functions");
@@ -664,7 +779,11 @@ impl Interpreter {
 
         //TODO use main arguments???
         info!("Running main");
-        let result = self.statement(&main_body.clone());
+        let result = self.statement(&main_body.clone())
+            .or_else(|error| match error {
+            ReturnCalled(memory_value) => Ok(memory_value),
+            other => Err(other)
+        });
         match result {
             Ok(value) => {
                 info!("Program completed successfully");
@@ -732,7 +851,7 @@ impl Interpreter {
         }
         
     }
-   
+    
     fn derived_declarator(&mut self, derived_declarator_node: &Node<DerivedDeclarator>) -> Result<DerivedDeclaratorInterpreter, ErrorInterpreter> {
         debug!("derived_declarator");
         let derived_declarator = &derived_declarator_node.node;
@@ -744,10 +863,7 @@ impl Interpreter {
                 let size = self.array_declarator(array)?;
                 Ok(DerivedDeclaratorInterpreter::Array(size))
             }
-            DerivedDeclarator::Function(_) => {
-                error!("Function not implemented in derived_declarator");
-                Err(NotImplemented)
-            }
+            DerivedDeclarator::Function(function_declarator) => Ok(DerivedDeclaratorInterpreter::Function),
             DerivedDeclarator::KRFunction(_) => {
                 error!("KrFunction not implemented in derived_declarator");
                 Err(NotImplemented)
@@ -771,11 +887,11 @@ impl Interpreter {
             n_pointers: 0,
         };
         if ! declarator.derived.is_empty(){
-            warn!("Declarator derived not implemented (for array, pointers, ...)");
             for derived_declarator in derived_list{
                 match self.derived_declarator(&derived_declarator)?{
                     DerivedDeclaratorInterpreter::Pointer => declarator_interpreter.n_pointers+=1,
                     DerivedDeclaratorInterpreter::Array(size) => declarator_interpreter.array_sizes.push(size),
+                    DerivedDeclaratorInterpreter::Function => {}
                 };
             }
             
@@ -794,10 +910,11 @@ impl Interpreter {
         match binary_operator_expression.operator.node {
             BinaryOperator::Index => {
                 let mut lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
-                let rhs =  match self.expression_value(&binary_operator_expression.rhs)?{
-                    MemoryValue::Int(value) => lhs.array_index = Some(value as usize),
+                let array =  match self.expression_value(&binary_operator_expression.rhs)?{
+                    MemoryValue::Int(value) => Some(value as usize),
                     _ => return Err(InvalidValueForArraySize)
                 };
+                lhs.array_index = array;
                 Ok(lhs)
             }
             _ => Err(NoIdentifierCanBeExtract)
@@ -806,21 +923,18 @@ impl Interpreter {
     fn get_operand_value(&mut self, lhs: &IdentifierData) -> Result<MemoryValue, ErrorInterpreter> {
         match lhs.array_index {
             Some(index) => self.get_value_from_pointer(&lhs.identifier, index),
-            None => self.get_value(&lhs.identifier),
+            None => self.get_value_no_array(&lhs.identifier),
         }
     }
-    fn store_operand_result(&mut self, lhs: &IdentifierData, result: MemoryValue) -> Result<(), ErrorInterpreter>  {
+    fn store_operand_result(&mut self, lhs: &IdentifierData, result: MemoryValue) -> Result<MemoryValue, ErrorInterpreter>  {
         match lhs.array_index {
             Some(index) => self.set_value_inside_pointer(&lhs.identifier, index, result),
             None => {
-                self.memory_manager.change_value(&lhs.identifier, result);
-                Ok(())
+                self.memory_manager.change_value(&lhs.identifier, result)
             }
         }
     }
     fn binary_operator_expression_value(&mut self, binary_operator_expression_node: &Node<BinaryOperatorExpression>) -> Result<MemoryValue, ErrorInterpreter> {
-
-
         debug!("binary_operator_expression_value");
         let binary_operator_expression = &binary_operator_expression_node.node;
         match binary_operator_expression.operator.node{
@@ -1033,11 +1147,10 @@ impl Interpreter {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
                 if let Some(array_index) = lhs.array_index{
-                    self.set_value_inside_pointer(&lhs.identifier, array_index, rhs)?;
+                    self.set_value_inside_pointer(&lhs.identifier, array_index, rhs)
                 }else{
-                    self.memory_manager.change_value(&lhs.identifier, rhs);
+                    self.memory_manager.change_value(&lhs.identifier, rhs)
                 }
-                Ok(MemoryValue::Unit)
             }
             BinaryOperator::AssignMultiply => {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
@@ -1231,21 +1344,125 @@ impl Interpreter {
                     _ => {Err(InvalidNegateOperator)}
                 }
             }
+            UnaryOperator::PostIncrement => {
+                let identifier = self.expression_identifier(&unary_operator.operand)?;
+                match value {
+                    MemoryValue::Int(value) => self.change_value(&identifier, MemoryValue::Int(value+1))?,
+                    MemoryValue::Float(value) => self.change_value(&identifier, MemoryValue::Float(value+1.0))?,
+                    _ => return Err(ImpossibleToIncrement)
+                };
+                Ok(value)
+            },
+            UnaryOperator::PostDecrement => {
+                let identifier = self.expression_identifier(&unary_operator.operand)?;
+                match value {
+                    MemoryValue::Int(value) => self.change_value(&identifier, MemoryValue::Int(value-1))?,
+                    MemoryValue::Float(value) => self.change_value(&identifier, MemoryValue::Float(value-1.0))?,
+                    _ => return Err(ImpossibleToIncrement)
+                };
+                Ok(value)
+            },
+            UnaryOperator::PreIncrement => {
+                let identifier = self.expression_identifier(&unary_operator.operand)?;
+                let new_value = match value {
+                    MemoryValue::Int(value) => {
+                        let new_value = MemoryValue::Int(value+1);
+                        self.change_value(&identifier, new_value.clone())?;
+                        new_value
+                    },
+                    MemoryValue::Float(value) => {
+                        let new_value = MemoryValue::Float(value+1.0);
+                        self.change_value(&identifier, new_value.clone())?;
+                        new_value
+                    },
+                    _ => return Err(ImpossibleToIncrement)
+                };
+                Ok(new_value)
+            },
+            UnaryOperator::PreDecrement => {
+                let identifier = self.expression_identifier(&unary_operator.operand)?;
+                let new_value = match value {
+                    MemoryValue::Int(value) => {
+                        let new_value = MemoryValue::Int(value-1);
+                        self.change_value(&identifier, new_value.clone())?;
+                        new_value
+                    },
+                    MemoryValue::Float(value) => {
+                        let new_value = MemoryValue::Float(value-1.0);
+                        self.change_value(&identifier, new_value.clone())?;
+                        new_value
+                    },
+                    _ => return Err(ImpossibleToIncrement)
+                };
+                Ok(new_value)
+            },
+            
             _ => {Err(NotImplemented)}
         }
         
         
+    }
+
+
+    fn specifier_qualifier(&mut self, specifier_quantifier_node: &Node<ast::SpecifierQualifier>) -> Result<SpecifierInterpreter, ErrorInterpreter>{
+        debug!("specifier_qualifier");
+        let specifier_quantifier = &specifier_quantifier_node.node;
+        match specifier_quantifier{
+            SpecifierQualifier::TypeSpecifier(node) => SpecifierInterpreter::fromNode(node),
+            SpecifierQualifier::TypeQualifier(_) => Err(NotImplemented),
+            SpecifierQualifier::Extension(_) => Err(NotImplemented)
+        }
+
+    }
+
+    fn type_name(&mut self, type_name_node: &Node<ast::TypeName>) -> Result<SpecifierInterpreter, ErrorInterpreter> {
+        debug!("type_name");
+        let type_name = &type_name_node.node;
+        if type_name.specifiers.is_empty(){
+            return Err(NotTypeSpecifierInTypeName)
+        }else if type_name.specifiers.len() > 1{
+            warn!("To many specifer in type name, will only take the first one...");
+        };
+        let specifier = type_name.specifiers.first().unwrap();
+        self.specifier_qualifier(specifier)
+
+
+
+    }
+    fn cast_expression(&mut self, cast_expression_node: &Node<ast::CastExpression>) -> Result<MemoryValue, ErrorInterpreter>{
+        debug!("cast_expression");
+        let cast_expression = &cast_expression_node.node;
+        let specifier = self.type_name(&cast_expression.type_name)?;
+        let value = self.expression_value(&cast_expression.expression)?;
+        value.cast(&specifier)
+    }
+    
+    fn printf(&self, mut args:Vec<MemoryValue>) -> Result<(), ErrorInterpreter> {
+        let inital_string = match args.remove(0) {
+            MemoryValue::String(value) => {value}
+            _=> return Err(InvalidArgumentsForPrintf)
+        };
+        print_c_format(inital_string.clone(), args)?;
+        Ok(())
+    }
+    fn call_expression(&mut self, call_expression_node: &Node<ast::CallExpression>) -> Result<MemoryValue, ErrorInterpreter> {
+        debug!("call_expression");
+        let call_expression = &call_expression_node.node;
+        let identifier = self.expression_identifier(&call_expression.callee)?;
+        let arguments: Result<Vec<MemoryValue>, ErrorInterpreter> = call_expression.arguments.iter().map(|node| self.expression_value(&node)).collect();
+        if identifier.identifier == "printf"{
+            self.printf(arguments?);
+            Ok(MemoryValue::Unit)
+        }else {
+            self.execute_functions(identifier.identifier, arguments?)
+        }
     }
     fn expression_value(&mut self, expression_node: &Node<ast::Expression>) -> Result<MemoryValue, ErrorInterpreter> {
         debug!("expression_value");
         let expression = &expression_node.node;
         match expression {
             ast::Expression::Identifier(identifier) => {
-                if let Some(value) = self.memory_manager.get_value(&IdentifierData::from_identifier(identifier.node.name.clone()).identifier){
-                    Ok(value.clone())
-                }else{
-                    Err(IdentifierNotFoundInMemory(identifier.node.name.clone()))
-                }
+                self.get_value_no_array(&identifier.node.name)
             }
             ast::Expression::BinaryOperator(binary_operator) => {
                 self.binary_operator_expression_value(&binary_operator)
@@ -1256,6 +1473,9 @@ impl Interpreter {
             ast::Expression::UnaryOperator(unary_operator) => {
                 self.unary_operator(&unary_operator)
             }
+            ast::Expression::Cast(cast_expression_node) => self.cast_expression(cast_expression_node),
+            ast::Expression::Call(call_expression) => self.call_expression(call_expression),
+            ast::Expression::StringLiteral(string_literal) => {Ok(MemoryValue::String(string_literal.node.concat()))}
             _=> {
                 println!("{:?}", expression);
                 warn!("Expression not implemented in expression");
@@ -1311,26 +1531,7 @@ impl Interpreter {
         let specifier = SpecifierInterpreter::fromVecDeclaration(&declaration.specifiers)?;
         let declaration: Vec<(DeclaratorInterpreter, Option<MemoryValue>)> = self.declarators(&declaration.declarators)?;
         for (declarator_interpreter, values) in declaration{
-            if !declarator_interpreter.array_sizes.is_empty()  &&  declarator_interpreter.n_pointers > 0 {
-                return Err(InitializationArrayAndPointerImpossible);
-            } else if declarator_interpreter.array_sizes.len() > 1{
-                return Err(MultipleDimensionArrayNotImplemented);
-            }
-            let local_specifier = if declarator_interpreter.array_sizes.len() == 1{
-                SpecifierInterpreter::Pointer(Box::new(specifier.clone()))}
-            else if declarator_interpreter.n_pointers == 1 {
-                SpecifierInterpreter::Pointer(Box::new(specifier.clone()))
-            }else if declarator_interpreter.n_pointers > 1 {
-                /*let mut result = specifier.clone();
-                for _ in 0..declarator_interpreter.n_pointers {
-                    result = SpecifierInterpreter::Pointer(Box::new(result));
-                }
-                result*/
-                return Err(MultiplePointerNotImplemented)
-            } else{
-                specifier.clone()
-            };
-            
+            let local_specifier = declarator_interpreter.to_specifier(specifier.clone())?;
             if let Some(values) = values{
                 if !values.same_type_specifier(&local_specifier){
                   error!("Bad type during declaration of variable for {}, {:?} instead of {:?}", declarator_interpreter.identifier.clone(), values, local_specifier);
@@ -1349,8 +1550,8 @@ impl Interpreter {
                     SpecifierInterpreter::Pointer(pointer_type) => {
                         if declarator_interpreter.array_sizes.len() == 1{
                             let default_value = pointer_type.default_value()?;
-                            let index = self.memory_manager.add_array(default_value, declarator_interpreter.array_sizes[0]);
-                            Ok(MemoryValue::Pointer(local_specifier,index))
+                            let index = self.memory_manager.add_array(default_value, declarator_interpreter.array_sizes[0])?;
+                            Ok(MemoryValue::Pointer(*pointer_type.clone(), index))
                         }else if declarator_interpreter.n_pointers == 1{
                             Err(NotImplemented)
                         }else{
@@ -1375,10 +1576,75 @@ impl Interpreter {
     fn compound(&mut self, compound: &Vec<Node<ast::BlockItem>>) -> Result<MemoryValue, ErrorInterpreter> {
         debug!("compound");
         for block_item in compound{
-            let value = self.block_item(&block_item)?;
-            if self.return_called{
-                return Ok(value);
+            let _ = self.block_item(&block_item)?;
+        }
+        Ok(MemoryValue::Unit)
+    }
+    fn if_statement(&mut self, if_statement: &Node<ast::IfStatement>) -> Result<MemoryValue, ErrorInterpreter> {
+        debug!("if_statement");
+        let if_statement = &if_statement.node;
+        let condition = self.expression_value(&if_statement.condition)?.evaluate_boolean_value()?;
+        if condition {
+            self.memory_manager.push_scope(SymbolTableKind::Scoped);
+            let res = self.statement(&*if_statement.then_statement);
+            self.memory_manager.free_scope();
+            res
+        }else { 
+            if let Some(else_statement) = &if_statement.else_statement{
+                self.memory_manager.push_scope(SymbolTableKind::Scoped);
+                let res = self.statement(&*else_statement);
+                self.memory_manager.free_scope();
+                res
+            }else { 
+                Ok(MemoryValue::Unit)
             }
+            
+        }
+    }
+    fn for_statement(&mut self, for_statement: &Node<ast::ForStatement>) -> Result<MemoryValue, ErrorInterpreter> {
+        debug!("for_statement");
+        self.memory_manager.push_scope(SymbolTableKind::Scoped);
+        let for_statement = &for_statement.node;
+        match &for_statement.initializer.node {
+            ForInitializer::Empty => {return Err(NotImplemented)},
+            ForInitializer::Expression(_) => {return Err(NotImplemented)}, //TODO implement this
+            ForInitializer::Declaration(declaration) => {self.declaration(&declaration)?;}
+            ForInitializer::StaticAssert(_) => {return Err(NotImplemented)}
+        }
+        while self.expression_value(for_statement.condition.as_ref().ok_or(ForConditionNotDefined)?)?.evaluate_boolean_value()? {
+            self.memory_manager.push_scope(SymbolTableKind::Scoped);
+            let res_statement = self.statement(&*for_statement.statement);
+            if !res_statement.is_ok() {
+                if let Err(BreakCalled) = res_statement{
+                    self.memory_manager.free_scope();
+                    break;
+                }else { 
+                    return res_statement;
+                }
+            }
+            self.expression_value(for_statement.step.as_ref().ok_or(ForStepNotDefined)?)?;
+            self.memory_manager.free_scope();
+        }
+        self.memory_manager.free_scope();
+        Ok(MemoryValue::Unit)
+
+    }
+    fn while_statement(&mut self, while_statement_node: &Node<ast::WhileStatement>) -> Result<MemoryValue, ErrorInterpreter> {
+        debug!("for_statement");
+        let while_statement = &while_statement_node.node;
+        
+        while self.expression_value(&while_statement.expression)?.evaluate_boolean_value()? {
+            self.memory_manager.push_scope(SymbolTableKind::Scoped);
+            let res_statement = self.statement(&*while_statement.statement);
+            if !res_statement.is_ok() {
+                if let Err(BreakCalled) = res_statement{
+                    self.memory_manager.free_scope();
+                    break;
+                }else {
+                    return res_statement;
+                }
+            }
+            self.memory_manager.free_scope();
         }
         Ok(MemoryValue::Unit)
 
@@ -1389,18 +1655,56 @@ impl Interpreter {
         let value = match statement {
             ast::Statement::Compound(comp) => self.compound(comp),
             ast::Statement::Expression(expression) => self.expression_value(expression.as_ref().unwrap()),
-            ast::Statement::Return(expression) => {
-                self.return_called = true;
-                self.expression_value(expression.as_ref().unwrap())
-            },
+            ast::Statement::Return(expression) => Err(ReturnCalled(self.expression_value(expression.as_ref().unwrap())?)),
+            ast::Statement::If(node_if) => self.if_statement(node_if),
+            ast::Statement::For(for_statement_node) => self.for_statement(for_statement_node),
+            ast::Statement::While(while_statement_node) => self.while_statement(while_statement_node),
+            ast::Statement::Break => Err(BreakCalled),
             _ => return Err(NotImplemented)
         };
         value
     }
 }
 
-
+fn print_c_format(string: String, values: Vec<MemoryValue>) -> Result<(), ErrorInterpreter> {
+    let list_c_format= ["%c","%d","%e","%f", "%lf", "%lf", "%lu", "%i", "%p", "%s"];
+    let mut first_index = 0;
+    let mut last_index = string.len()-1;
+    if string.chars().nth(0).unwrap() == '"'{
+        first_index += 1;
+    };
+    if string.chars().last().unwrap() == '"'{
+        last_index -= 1;
+    };
+    let string = string.get(first_index..=last_index).unwrap();
     
+    let mut parts = vec![string.to_string()];
+    for delimiter in list_c_format {
+        // Collect all current parts and split them further
+        parts = parts.iter()
+            .flat_map(|part| part.split(delimiter))
+            .map(|s| s.to_string())
+            .collect();
+    }
+    if parts.len() != values.len()+1{
+        return Err(InvalidNumberArgumentPrintf);
+    }
+    for (value, part) in values.iter().zip(parts.iter()) {
+        let value = match value {
+            MemoryValue::Int(value) => {value.to_string()},
+            MemoryValue::Float(value) => {value.to_string()},
+            MemoryValue::Char(value) => {value.to_string()},
+            MemoryValue::Pointer(_,addres) => {format!("POINTER_WITH_ADDRESS:{}*",addres)},
+            MemoryValue::String(value) => {value.to_string()},
+            MemoryValue::Null => {"null".to_string()},
+            MemoryValue::Unit => {"unit".to_string()},
+        };
+        let new_part = part.clone().replace(r"\n", "\n");
+        print!("{}{}", new_part , value);
+    }
+    print!("{}", parts.last().unwrap().replace(r"\n", "\n"));
+    Ok(())
+}
 
 fn main() {
     env_logger::init();
@@ -1434,10 +1738,30 @@ mod tests {
         assert_eq!(res, MemoryValue::Unit);
     }
     #[test]
-    fn basic_adition(){
+    fn basic_addition(){
         let mut interpreter = Interpreter::new();
         let res = interpreter.run("./c_programs/tests/basic_addition.c");
         assert_eq!(res, MemoryValue::Int(4));
+    }
+    
+    #[test]
+    fn list_manipulation(){
+        let mut interpreter = Interpreter::new();
+        let res = interpreter.run("./c_programs/tests/list_manipulation.c");
+        assert_eq!(res, MemoryValue::Int(60));
+    }
+
+    #[test]
+    fn local_scope(){
+        let mut interpreter = Interpreter::new();
+        let res = interpreter.run("./c_programs/tests/local_scope.c");
+        assert_eq!(res, MemoryValue::Int(3));
+    }
+    #[test]
+    fn for_loop(){
+        let mut interpreter = Interpreter::new();
+        let res = interpreter.run("./c_programs/tests/for_loop.c");
+        assert_eq!(res, MemoryValue::Int(20));
     }
 }
 
