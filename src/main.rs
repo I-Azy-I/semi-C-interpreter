@@ -20,11 +20,16 @@ use log::{debug, error, info, warn};
 use env_logger::{Logger, Env};
 use lang_c::ast::{ArrayDeclarator, ArraySize, BinaryOperator, BinaryOperatorExpression, Constant, DerivedDeclarator, FloatBase, ForInitializer, IntegerBase, SpecifierQualifier, UnaryOperator, UnaryOperatorExpression};
 use std::mem::discriminant;
+
+use clap::Parser;
+
 use crate::ErrorInterpreter::*;
 
+
+
 const PRINT_MEMORY: bool = false;
-const STACK_SIZE: usize = 20;
-#[derive(Debug)]
+const STACK_SIZE: usize = 1000000;
+#[derive(Debug, Clone)]
 enum ErrorInterpreter{
     NotImplemented,
     TypeConversion,
@@ -76,7 +81,17 @@ enum ErrorInterpreter{
     ImpossibleToCastIntoThisType(String),
     StringUsedAsValue,
     InvalidNumberArgumentPrintf,
-    InvalidArgumentsForPrintf
+    InvalidArgumentsForPrintf,
+    EmptyDeclarationArray,
+    ConversionValueSpecifierNotImplement,
+    NotSameSizeArrayAndDeclarationOfArray,
+    FunctionReturnWrongType(String),
+    IndirectionOnNonPointer,
+    WhatHaveYouDone,
+    ImpossibleToAssignValueToAddress,
+    ImpossibleToGetValueFromAddress,
+    ImpossibleToGetAddressOfAValue
+
 }
 type Int = i64;
 type Float = f64;
@@ -85,7 +100,7 @@ enum MemoryValue {
     Int(i64),
     Float(f64),
     Char(char),
-    //Array(SpecifierInterpreter,Vec<MemoryValue>),
+    Array(SpecifierInterpreter, Vec<MemoryValue>), // only used for decalaration of arrays
     Pointer(SpecifierInterpreter,usize),
     String(String),
     Null,
@@ -98,6 +113,8 @@ impl MemoryValue {
             (MemoryValue::Int(_), SpecifierInterpreter::Int) => true,
             (MemoryValue::Float(_), SpecifierInterpreter::Float) => true,
             (MemoryValue::Pointer(pointer_type_value,_), SpecifierInterpreter::Pointer(pointer_type_specifier)) => pointer_type_value.eq(pointer_type_specifier),
+            (MemoryValue::Array(_,_), SpecifierInterpreter::Pointer(_)) => true,
+            (MemoryValue::Unit, SpecifierInterpreter::Void) => true,
             _ => false
         }
     }
@@ -106,6 +123,15 @@ impl MemoryValue {
             MemoryValue::Int(value) => Ok(*value != 0),
             MemoryValue::Float(value) => Ok(*value != 0.0),
             _=> Err(HasToBeAIntOrFloatForBooleanEvaluation)
+        }
+    }
+    fn get_specifier(&self) -> Result<SpecifierInterpreter, ErrorInterpreter> {
+        match self {
+            MemoryValue::Int(_) => Ok(SpecifierInterpreter::Int),
+            MemoryValue::Float(_) => Ok(SpecifierInterpreter::Float),
+            MemoryValue::Pointer(pointer_type_value,_) => Ok(SpecifierInterpreter::Pointer(Box::new(pointer_type_value.clone()))),
+            MemoryValue::Array(pointer_type_value,_) => unreachable!(),
+            _ => Err(ConversionValueSpecifierNotImplement)
         }
     }
     fn cast(self, specifier: &SpecifierInterpreter) -> Result<MemoryValue, ErrorInterpreter> {
@@ -180,10 +206,14 @@ enum SpecifierInterpreter {
 
 impl SpecifierInterpreter {
     fn default_value(&self) -> Result<MemoryValue,ErrorInterpreter> {
-        match self{
+        match &self{
             &SpecifierInterpreter::Int => Ok(MemoryValue::Int(0)),
             &SpecifierInterpreter::Float => Ok(MemoryValue::Float(0.0)),
             &SpecifierInterpreter::Void => Ok(MemoryValue::Unit),
+            &SpecifierInterpreter::Pointer(type_pointed) => {
+                warn!("Pointer set to null because not initialized");
+                Ok(MemoryValue::Pointer(*type_pointed.clone(), 0))
+            }
             _ => Err(InvalidDefaultSpecifierValueConversion),
         }
     }
@@ -197,6 +227,9 @@ impl SpecifierInterpreter {
         }
     }
     fn fromVecDeclaration(declaration_specifiers: &Vec<Node<ast::DeclarationSpecifier>>) -> Result<SpecifierInterpreter, ErrorInterpreter>{
+        if declaration_specifiers.len() != 1{
+            warn!("Only 1 specifier can be use (no const, ..)")
+        };
         let specifier = declaration_specifiers
             .iter()
             .find(|node| {
@@ -227,7 +260,7 @@ impl SpecifierInterpreter {
 }
 struct DeclaratorInterpreter {
     identifier: Identifier,
-    array_sizes: Vec<usize>,
+    array_sizes: Vec<Option<usize>>,
     n_pointers: usize,
 }
 impl DeclaratorInterpreter{
@@ -240,15 +273,12 @@ impl DeclaratorInterpreter{
         if self.array_sizes.len() == 1{
             Ok(SpecifierInterpreter::Pointer(Box::new(specifier)))
         }
-        else if self.n_pointers == 1 {
-            Ok(SpecifierInterpreter::Pointer(Box::new(specifier)))
-        }else if self.n_pointers > 1 {
-            /*let mut result = specifier.clone();
-            for _ in 0..declarator_interpreter.n_pointers {
-                result = SpecifierInterpreter::Pointer(Box::new(result));
-            }
-            result*/
-            return Err(MultiplePointerNotImplemented)
+        else if self.n_pointers > 0 {
+            let mut specifier = specifier;
+            for _ in 0 ..self.n_pointers{
+                specifier = SpecifierInterpreter::Pointer(Box::new(specifier));
+            };
+            Ok(specifier)
         } else{
             Ok(specifier)
         }
@@ -256,25 +286,27 @@ impl DeclaratorInterpreter{
 }
 enum DerivedDeclaratorInterpreter{
     Pointer,
-    Array(usize),
+    Array(Option<usize>),
     Function,
 }
 
 type FunctionArgument = (Option<Identifier>, SpecifierInterpreter);
 type Body = ast::Statement;
-type FunctionData = (Identifier, Vec<FunctionArgument>, Node<Body>);
+type FunctionData = (Identifier,SpecifierInterpreter, Vec<FunctionArgument>, Node<Body>);
 type Identifier = String ;
 
 #[derive(Debug, Clone)]
 struct IdentifierData{
     identifier: Identifier,
     array_index: Option<usize>,
+    depth: i32
 }
 impl IdentifierData{
     fn from_identifier(identifier: Identifier) -> Self{
         IdentifierData {
             identifier,
             array_index: None,
+            depth: 0
         }
     }
 }
@@ -482,8 +514,20 @@ impl MemoryManager{
         debug!("{}", self.build_state());
         v.clone()
     }
+    fn add_array(&mut self, values: &Vec<MemoryValue>) -> Result<MemoryIndex, ErrorInterpreter> {
+        let size = values.len();
+        if size== 0 {
+            return  Err(ArraySizeLessThanOne)
+        }
+        let index = self.memory.add(values[0].clone());
+        for i in 1..size{
+            self.set_to_index(i + index, values[i].clone());
+        };
+        self.memory.stack_pointer += size-1;
+        Ok(index)
+    }
     
-    fn add_array(&mut self, default_value: MemoryValue, size: usize) -> Result<MemoryIndex, ErrorInterpreter>{
+    fn add_array_default(&mut self, default_value: MemoryValue, size: usize) -> Result<MemoryIndex, ErrorInterpreter>{
         debug!("MEMORY_STATE_BEFORE ADD ARRAY {:?} {}", default_value, size);
         debug!("{}", self.build_state());
         if size == 0 {
@@ -518,9 +562,10 @@ impl MemoryManager{
                 MemoryValue::Char(value) => {format!("{}", value)}
                 //MemoryValue::Array(type_array, array) => {format!("type: {:?}, content: {:?}", type_array, array)}
                 MemoryValue::Pointer(type_pointer, pointer) => {format!("Pointer type: {:?}, address: {:?}", type_pointer, pointer)}
-                MemoryValue::Null => { "null".to_string()},
+                MemoryValue::Null => { break },
                 MemoryValue::Unit => { "unit".to_string()},
                 MemoryValue::String(string) => { format!("String: {}", string) },
+                MemoryValue::Array(_,_) => unreachable!(),
             };
             res.push_str(el.clone().as_str());
         }
@@ -593,8 +638,15 @@ impl Interpreter {
         }
     }
     fn get_value(&mut self, identifier: &IdentifierData) -> Result<MemoryValue, ErrorInterpreter> {
-        if let Some(array_index) = identifier.array_index{
-            self.get_value_from_pointer(&identifier.identifier, array_index)
+        if identifier.depth < 0 ||(identifier.array_index.is_some() && identifier.depth == 0){
+            return Err(ImpossibleToGetValueFromAddress)
+        };
+        if identifier.depth > 0{
+            if let Some(array_index) = identifier.array_index{
+                self.get_value_from_pointer(&identifier.identifier, array_index, identifier.depth as usize)
+            }else{ 
+                unreachable!()
+            }
         }else{
             self.get_value_no_array(&identifier.identifier)
         }
@@ -607,33 +659,82 @@ impl Interpreter {
             Err(IdentifierNotFoundInMemory(identifier.clone()))
         }
     }
-    fn get_value_from_pointer(&mut self, identifier: &Identifier, offset: usize) -> Result<MemoryValue, ErrorInterpreter> {
-        let inside_value_pointer = self.get_value_no_array(&identifier)?;
-        let pointer_address = match inside_value_pointer{
+    fn get_value_from_index(&mut self, index: usize, depth: usize) -> Result<MemoryValue, ErrorInterpreter>{
+        assert!(depth > 0);
+        let pointer = self.memory_manager.get_from_index(index);
+        let pointer_address = match pointer{
             MemoryValue::Pointer(_, address) => address,
             _ => return Err(NotAPointer)
         };
-        Ok(self.memory_manager.get_from_index(pointer_address+offset))
+        if depth == 1 {
+            Ok(self.memory_manager.get_from_index(pointer_address ))
+        }else {
+            self.get_value_from_index(pointer_address, depth-1)
+        }
     }
-
-    fn set_value_inside_pointer(&mut self, identifier: &Identifier, offset: usize, value: MemoryValue) -> Result<MemoryValue, ErrorInterpreter> {
-        let pointer = self.get_value_no_array(identifier)?;
-
+    fn get_value_from_pointer(&mut self, identifier: &Identifier, offset: usize, depth: usize) -> Result<MemoryValue, ErrorInterpreter> {
+        let pointer = self.get_value_no_array(&identifier)?;
         let pointer_address = match pointer{
+            MemoryValue::Pointer(_, address) => address,
+            _ => return Err(NotAPointer)
+        };
+        if depth == 1 {
+            Ok(self.memory_manager.get_from_index(pointer_address + offset))
+        }else {
+            self.get_value_from_index(pointer_address + offset, depth-1)
+        }
+    }
+        
+    
+    fn set_value_at_index(&mut self, index: usize, value: MemoryValue, depth: usize) -> Result<MemoryValue, ErrorInterpreter> {
+        assert!(depth > 0);
+        let pointer = self.memory_manager.get_from_index(index);
+        let pointer_address=  match pointer{
             MemoryValue::Pointer(type_pointer, address) => {
-                if !value.same_type_specifier(&type_pointer){
-                   return  Err(InvalidType(format!("Impossible to change {:?} with {:?}", type_pointer, value)))
+                if depth == 1 && !value.same_type_specifier(&type_pointer){
+                    return  Err(InvalidType(format!("Impossible to change {:?} with {:?}", type_pointer, value)))
                 };
                 address},
             _ => return Err(NotAPointer)
         };
-        self.memory_manager.set_to_index(pointer_address + offset, value.clone());
-        Ok(value)
+        if depth == 1 {
+            self.memory_manager.set_to_index(pointer_address, value.clone());
+            Ok(value)
+        }else {
+            self.set_value_at_index(pointer_address, value, depth-1)
+        }
+        
+    }
+    fn set_value_inside_pointer(&mut self, identifier: &Identifier, offset: usize, value: MemoryValue, depth: usize) -> Result<MemoryValue, ErrorInterpreter> {
+        assert!(depth > 0);
+        let pointer = self.get_value_no_array(identifier)?;
+        let pointer_address = match pointer{
+            MemoryValue::Pointer(type_pointer, address) => {
+                if depth == 1 && !value.same_type_specifier(&type_pointer){
+                    return  Err(InvalidType(format!("Impossible to change {:?} with {:?}", type_pointer, value)))
+                };
+                address},
+            _ => return Err(NotAPointer)
+        };
+        if depth == 1 {
+                self.memory_manager.set_to_index(pointer_address + offset, value.clone());
+                Ok(value)
+        }else { 
+            self.set_value_at_index(pointer_address + offset, value, depth-1)
+        }
+       
     }
     fn change_value(&mut self, identifier: &IdentifierData, value: MemoryValue) -> Result<MemoryValue, ErrorInterpreter> {
-        if let Some(array_index) = identifier.array_index{
-            self.set_value_inside_pointer(&identifier.identifier, array_index, value)
-        }else{
+        if identifier.depth< 0 ||(identifier.array_index.is_some() && identifier.depth == 0){
+            return Err(ImpossibleToAssignValueToAddress)
+        };
+        if identifier.depth > 0 {
+            if let Some(array_index) = identifier.array_index {
+                self.set_value_inside_pointer(&identifier.identifier, array_index, value, identifier.depth as usize)
+            }else {
+                self.set_value_inside_pointer(&identifier.identifier, 0, value, identifier.depth as usize)
+            }
+        }else {
             self.memory_manager.change_value(&identifier.identifier, value)
         }
     }
@@ -645,12 +746,12 @@ impl Interpreter {
     fn get_function_arguments(&mut self, function_def: &ast::FunctionDefinition) -> Result<Vec<FunctionArgument>, ErrorInterpreter>{
         let declarator = &function_def.declarator.node;
         let nodes_arg = &declarator.derived;
-        if nodes_arg.len() != 1{
-            warn!("Function declarator does not have exactly one argument, et t'as rien compris chef");
-            return Err(UnreachableReached);
-        }
-        let nodes_arg = &nodes_arg.iter().next().expect("Function declarator does not have exactly one argument").node;
-
+        let nodes_arg = &nodes_arg.iter().find(
+            |derived_decl_node|
+                match derived_decl_node.node{
+                    ast::DerivedDeclarator::Function(_) | ast::DerivedDeclarator::KRFunction(_) =>true,
+                    _ => false
+                }).expect("Function is empty, should not be possible, or I didn't understood anything").node;
         match nodes_arg {
             ast::DerivedDeclarator::Function(func_declarator) => {
                 let func_declarator = &func_declarator.node;
@@ -669,6 +770,14 @@ impl Interpreter {
                 }
                 Ok(function_args)
             }
+            ast::DerivedDeclarator::KRFunction(identifiers) => {
+                if ! identifiers.is_empty(){
+                    warn!("Kr function not implemented");
+                    Err(NotImplemented)
+                }else{
+                    Ok(Vec::new())
+                }
+            },
             _ => {
                 warn!("Bad pattern founded while fetching arguments from function");
                 Err(UnreachableReached)
@@ -677,6 +786,23 @@ impl Interpreter {
     }
     fn get_function_body(&self, function_def: &ast::FunctionDefinition) -> Result<Node<Body>,ErrorInterpreter>{
         Ok(function_def.statement.clone())
+    }
+    fn get_return_specifier(&mut self, function_def: &ast::FunctionDefinition ) -> Result<SpecifierInterpreter,ErrorInterpreter>{
+        let declarator = &function_def.declarator.node;
+        let nodes_arg = &declarator.derived;
+        let pointer_count = nodes_arg.iter().fold(0 as usize,
+                                                  |acc, derived_decl_node|
+                                                      match derived_decl_node.node{
+                                                          DerivedDeclarator::Pointer(_) => {acc+1}
+                                                          _=> acc
+                                                      });
+        let mut specifier = SpecifierInterpreter::fromVecDeclaration(&function_def.specifiers)?;
+        for _ in  0..pointer_count {
+            specifier = SpecifierInterpreter::Pointer(Box::new(specifier));
+        };
+        Ok(specifier)
+        
+        
     }
     fn get_function_data<T: 'static>(&mut self, node: &Node<T>) -> Result<FunctionData, ErrorInterpreter> {
         match TypeId::of::<T>() {
@@ -690,7 +816,8 @@ impl Interpreter {
                         let name = self.get_function_name(function_def)?;
                         let arguments = self.get_function_arguments(function_def)?;
                         let body = self.get_function_body(function_def)?;
-                        Ok((name, arguments, body))
+                        let return_specifier = self.get_return_specifier(function_def)?;
+                        Ok((name, return_specifier, arguments, body))
                     },
                     ast::ExternalDeclaration::StaticAssert(_) => {
                         Err(NotAFunction)
@@ -707,44 +834,50 @@ impl Interpreter {
     }
     fn execute_functions(&mut self, function_identifier: Identifier, variables: Vec<MemoryValue>) -> Result<MemoryValue, ErrorInterpreter> {
         // fetch function data
-        let (_, function_arguments, body) = self.functions.get(&function_identifier)
-            .ok_or_else(|| FunctionNotFounded(function_identifier.clone()))?;
-        // if function is empty or Void just skip variable initialization
-        if  !(function_arguments.len() == 0) && !(function_arguments[0].1 == SpecifierInterpreter::Void){
-            // check number of arguments
-            if variables.len() !=  function_arguments.len() {
-                return Err(IncorrectTypeOfArguments(format!("Incorrect number of variables, expected: {}, got: {}", function_arguments.len(), variables.len())));
-            }
-            // check if variables are valid
-            for ((_, argument_specifier), given_variable_value) in function_arguments.iter().zip(&variables) {
-                if !given_variable_value.same_type_specifier(argument_specifier){
-                    return Err(IncorrectTypeOfArguments(format!("Incorrect type of argument {}, expected {:?}, found {:?}", function_identifier.clone(), argument_specifier.clone(), given_variable_value)));
+        let (return_specifier, body) = {
+            let (_, return_specifier, function_arguments, body) = self.functions.get(&function_identifier)
+                .ok_or_else(|| FunctionNotFounded(function_identifier.clone()))?;
+            // if function is empty or Void just skip variable initialization
+            if !(function_arguments.len() == 0) && !(function_arguments[0].1 == SpecifierInterpreter::Void) {
+                // check number of arguments
+                if variables.len() != function_arguments.len() {
+                    return Err(IncorrectTypeOfArguments(format!("Incorrect number of variables, expected: {}, got: {}", function_arguments.len(), variables.len())));
                 }
-            }
-            self.memory_manager.push_scope(SymbolTableKind::Restricted);
+                // check if variables are valid
+                for ((_, argument_specifier), given_variable_value) in function_arguments.iter().zip(&variables) {
+                    if !given_variable_value.same_type_specifier(argument_specifier) {
+                        return Err(IncorrectTypeOfArguments(format!("Incorrect type of argument {}, expected {:?}, found {:?}", function_identifier.clone(), argument_specifier.clone(), given_variable_value)));
+                    }
+                }
+                self.memory_manager.push_scope(SymbolTableKind::Restricted);
 
-            // add variables in the new scope
-            for ((argument_identifier, _), variable_values) in function_arguments.iter().zip(variables) {
-                let argument_identifier = if let Some(argument_identifier) = argument_identifier {
-                    argument_identifier
-                }else { 
-                    continue
-                };
-                self.memory_manager.create_value(argument_identifier, variable_values);
+                // add variables in the new scope
+                for ((argument_identifier, _), variable_values) in function_arguments.iter().zip(variables) {
+                    let argument_identifier = if let Some(argument_identifier) = argument_identifier {
+                        argument_identifier
+                    } else {
+                        continue
+                    };
+                    self.memory_manager.create_value(argument_identifier, variable_values);
+                }
+            } else {
+                self.memory_manager.push_scope(SymbolTableKind::Restricted);
             }
-        }else { 
-            self.memory_manager.push_scope(SymbolTableKind::Restricted);
-        }
-        println!("Entering function {}", function_identifier.clone());
-        let function_value = self.statement(&body.clone())
+            (return_specifier.clone(), body.clone())
+        };
+        //println!("Entering function {}", function_identifier.clone());
+        let function_value = self.statement(&body)
             .or_else(|error| match error {
                 ReturnCalled(memory_value) => Ok(memory_value),
                 other => Err(other)
-            });
+            })?;
         self.memory_manager.free_scope();
-        function_value
-       
-
+        if function_value.same_type_specifier(&return_specifier) {
+            Ok(function_value)
+        }else { 
+            Err(FunctionReturnWrongType(format!("Incorrect return type in a function got {:?} instead of type {:?}", function_value, return_specifier)))
+        }
+        
     }
    
     fn run<P: AsRef<Path>> (&mut self, file_name: P) -> MemoryValue {
@@ -770,7 +903,7 @@ impl Interpreter {
             self.functions.insert(function.0.clone(), function);
         }
         info!("functions saved");
-        let (main_identifier, main_arguments, main_body) = if let Some(main) = self.functions.get("main"){
+        let (main_identifier,main_return_specifier,  main_arguments, main_body) = if let Some(main) = self.functions.get("main"){
             main
         }else{
             error!("No main function");
@@ -818,12 +951,13 @@ impl Interpreter {
             }
             ast::DeclaratorKind::Declarator(_) => {
                 warn!("Declarator not implemented in declarator");
+                
                 Err(NotImplemented)
             }
         }
     }
     
-    fn array_declarator(&mut self, array_declarator: &Node<ast::ArrayDeclarator>) -> Result<usize, ErrorInterpreter> {
+    fn array_declarator(&mut self, array_declarator: &Node<ast::ArrayDeclarator>) -> Result<Option<usize>, ErrorInterpreter> {
         debug!("array_declarator");
         let array_declarator = &array_declarator.node;
         if !array_declarator.qualifiers.is_empty() {
@@ -831,8 +965,7 @@ impl Interpreter {
         };
         match &array_declarator.size {
             ArraySize::Unknown => {
-                error!("You have to define the size of an array");
-                Err(NotImplemented)
+                Ok(None)
             }
             ArraySize::VariableUnknown => {
                 error!("You have to define the size of an array");
@@ -840,7 +973,14 @@ impl Interpreter {
             }
             ArraySize::VariableExpression(expression) => {
                 match self.expression_value(&expression)? {
-                    MemoryValue::Int(value) => { Ok(value as usize) }
+                    MemoryValue::Int(value) => {
+                        if value > 0{
+                            Ok(Some(value as usize))
+                        }else {
+                            Err(InvalidValueForArraySize)
+                        }
+                    }
+
                     _ => Err(InvalidValueForArraySize)
                 }
             }
@@ -861,13 +1001,11 @@ impl Interpreter {
             }
             DerivedDeclarator::Array(array) => {
                 let size = self.array_declarator(array)?;
+
                 Ok(DerivedDeclaratorInterpreter::Array(size))
             }
             DerivedDeclarator::Function(function_declarator) => Ok(DerivedDeclaratorInterpreter::Function),
-            DerivedDeclarator::KRFunction(_) => {
-                error!("KrFunction not implemented in derived_declarator");
-                Err(NotImplemented)
-            }
+            DerivedDeclarator::KRFunction(_) => Ok(DerivedDeclaratorInterpreter::Function),
             DerivedDeclarator::Block(_) => {
                 error!("Block not implemented in derived_declarator");
                 Err(NotImplemented)
@@ -911,28 +1049,28 @@ impl Interpreter {
             BinaryOperator::Index => {
                 let mut lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let array =  match self.expression_value(&binary_operator_expression.rhs)?{
-                    MemoryValue::Int(value) => Some(value as usize),
+                    MemoryValue::Int(value) => {
+                        Some(value as usize)
+                    },
                     _ => return Err(InvalidValueForArraySize)
                 };
                 lhs.array_index = array;
+                lhs.depth = 1;
                 Ok(lhs)
+            },
+            
+            
+            _ => {
+                
+                Err(NoIdentifierCanBeExtract)
             }
-            _ => Err(NoIdentifierCanBeExtract)
         } 
     }
     fn get_operand_value(&mut self, lhs: &IdentifierData) -> Result<MemoryValue, ErrorInterpreter> {
-        match lhs.array_index {
-            Some(index) => self.get_value_from_pointer(&lhs.identifier, index),
-            None => self.get_value_no_array(&lhs.identifier),
-        }
+        self.get_value(&lhs)
     }
     fn store_operand_result(&mut self, lhs: &IdentifierData, result: MemoryValue) -> Result<MemoryValue, ErrorInterpreter>  {
-        match lhs.array_index {
-            Some(index) => self.set_value_inside_pointer(&lhs.identifier, index, result),
-            None => {
-                self.memory_manager.change_value(&lhs.identifier, result)
-            }
-        }
+        self.change_value(&lhs, result)
     }
     fn binary_operator_expression_value(&mut self, binary_operator_expression_node: &Node<BinaryOperatorExpression>) -> Result<MemoryValue, ErrorInterpreter> {
         debug!("binary_operator_expression_value");
@@ -1146,11 +1284,8 @@ impl Interpreter {
             BinaryOperator::Assign => {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
-                if let Some(array_index) = lhs.array_index{
-                    self.set_value_inside_pointer(&lhs.identifier, array_index, rhs)
-                }else{
-                    self.memory_manager.change_value(&lhs.identifier, rhs)
-                }
+                self.change_value(&lhs, rhs)
+                
             }
             BinaryOperator::AssignMultiply => {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
@@ -1322,15 +1457,17 @@ impl Interpreter {
     fn unary_operator(&mut self, unary_operator_node: &Node<ast::UnaryOperatorExpression>) -> Result<MemoryValue, ErrorInterpreter> {
         debug!("unary_operator");
         let unary_operator = &unary_operator_node.node;
-        let value = self.expression_value(&unary_operator.operand)?;
+       
         match unary_operator.operator.node{
             UnaryOperator::Plus => {
+                let value = self.expression_value(&unary_operator.operand)?;
                 match value{
                     MemoryValue::Int(_) | MemoryValue::Float(_) => { Ok(value) }
                     _ => {Err(InvalidPlusOperator)}
                 }
             }
             UnaryOperator::Minus => {
+                let value = self.expression_value(&unary_operator.operand)?;
                 match value{
                     MemoryValue::Int(i)  => Ok(MemoryValue::Int(-i)),
                     MemoryValue::Float(f) => Ok(MemoryValue::Float(-f)),
@@ -1338,6 +1475,7 @@ impl Interpreter {
                 }
             }
             UnaryOperator::Negate => {
+                let value = self.expression_value(&unary_operator.operand)?;
                 match value{
                     MemoryValue::Int(i)  => Ok(MemoryValue::Int( if i==0 {1} else {0})),
                     MemoryValue::Float(f) => Ok(MemoryValue::Int( if f==0.0 {1} else {0})),
@@ -1345,6 +1483,7 @@ impl Interpreter {
                 }
             }
             UnaryOperator::PostIncrement => {
+                let value = self.expression_value(&unary_operator.operand)?;
                 let identifier = self.expression_identifier(&unary_operator.operand)?;
                 match value {
                     MemoryValue::Int(value) => self.change_value(&identifier, MemoryValue::Int(value+1))?,
@@ -1354,6 +1493,7 @@ impl Interpreter {
                 Ok(value)
             },
             UnaryOperator::PostDecrement => {
+                let value = self.expression_value(&unary_operator.operand)?;
                 let identifier = self.expression_identifier(&unary_operator.operand)?;
                 match value {
                     MemoryValue::Int(value) => self.change_value(&identifier, MemoryValue::Int(value-1))?,
@@ -1363,6 +1503,7 @@ impl Interpreter {
                 Ok(value)
             },
             UnaryOperator::PreIncrement => {
+                let value = self.expression_value(&unary_operator.operand)?;
                 let identifier = self.expression_identifier(&unary_operator.operand)?;
                 let new_value = match value {
                     MemoryValue::Int(value) => {
@@ -1380,6 +1521,7 @@ impl Interpreter {
                 Ok(new_value)
             },
             UnaryOperator::PreDecrement => {
+                let value = self.expression_value(&unary_operator.operand)?;
                 let identifier = self.expression_identifier(&unary_operator.operand)?;
                 let new_value = match value {
                     MemoryValue::Int(value) => {
@@ -1396,7 +1538,35 @@ impl Interpreter {
                 };
                 Ok(new_value)
             },
-            
+            UnaryOperator::Address => {
+                let mut identifier = self.expression_identifier(&unary_operator.operand)?;
+                if identifier.depth == 0{
+                    let index = if let Some(offset) = identifier.array_index{
+                        if let MemoryValue::Pointer(_, index) = self.get_value_no_array(&identifier.identifier)?{
+                            index + offset
+                        }else{
+                            unreachable!()
+                        }
+                    }else {
+                        self.get_index(&identifier.identifier)?
+                    };
+                    let pointer_specifier = self.get_value(&identifier)?.get_specifier()?;
+                    Ok(MemoryValue::Pointer(pointer_specifier, index))
+                }else if identifier.depth > 0 {
+                    identifier.depth -= 1;
+                    self.get_value(&identifier)
+                }else{
+                    Err(ImpossibleToGetAddressOfAValue)
+                }
+                
+            },
+            UnaryOperator::Indirection => {
+                let value = self.expression_value(&unary_operator.operand)?;
+                match value {
+                    MemoryValue::Pointer(_, index) => Ok(self.memory_manager.memory.get(index).clone()),
+                    _=> Err(IndirectionOnNonPointer)
+                }
+            },
             _ => {Err(NotImplemented)}
         }
         
@@ -1491,6 +1661,20 @@ impl Interpreter {
             ast::Expression::BinaryOperator(binary_operator) => {
                 self.binary_operator_expression_identifier(binary_operator)
             },
+            ast::Expression::UnaryOperator(unary_operator) => {
+                let mut identifier = self.expression_identifier(&unary_operator.node.operand)?;
+                identifier.array_index.or(Some(0));
+                match unary_operator.node.operator.node {
+                    UnaryOperator::Address => {
+                        identifier.depth-=1;
+                    }
+                    UnaryOperator::Indirection => {
+                        identifier.depth+=1;
+                    }
+                    _ => return Err(WhatHaveYouDone)
+                };
+                Ok(identifier)
+            },
             _ => {
                 println!("{:?}", expression);
                 Err(NotImplemented)
@@ -1502,7 +1686,15 @@ impl Interpreter {
         let initializer = &initializer_node.node;
         match initializer {
             ast::Initializer::Expression(expression) => {self.expression_value(&expression)}
-            ast::Initializer::List(initializer_list_item) => {todo!()}
+            ast::Initializer::List(initializer_list_item) => {
+                let list_mem_value: Result<Vec<MemoryValue>,ErrorInterpreter> = initializer_list_item.iter().map(|init| self.initializer(&init.node.initializer)).collect();
+                let list_mem_value = list_mem_value?;
+                if list_mem_value.is_empty(){
+                    return Err(EmptyDeclarationArray)
+                }
+                let value = list_mem_value[0].get_specifier()?;
+                Ok(MemoryValue::Array(value,list_mem_value))
+            }
         }
     }
     fn declarators(&mut self, declarators: &Vec<Node<ast::InitDeclarator>>) -> Result<Vec<(DeclaratorInterpreter, Option<MemoryValue>)>, ErrorInterpreter> {
@@ -1537,8 +1729,34 @@ impl Interpreter {
                   error!("Bad type during declaration of variable for {}, {:?} instead of {:?}", declarator_interpreter.identifier.clone(), values, local_specifier);
                   return Err(IncorrectTypeDeclaration(format!("Bad type during declaration of variable for {}, {:?} instead of {:?}",  declarator_interpreter.identifier.clone(), values, local_specifier)));
                 }
-                
-                self.memory_manager.create_value(&declarator_interpreter.identifier, values);
+                match values{
+                    MemoryValue::Int(_) => {self.memory_manager.create_value(&declarator_interpreter.identifier, values);}
+                    MemoryValue::Float(_) => {self.memory_manager.create_value(&declarator_interpreter.identifier, values);}
+                    MemoryValue::Array(inside_type, values) => {
+                        if declarator_interpreter.array_sizes[0].ok_or(InvalidValueForArraySize)? != values.len(){
+                            return Err(NotSameSizeArrayAndDeclarationOfArray);
+                        }
+                        match local_specifier {
+                          SpecifierInterpreter::Pointer(inside_type) => {
+                              for value in &values{
+                                  if !value.same_type_specifier(&*inside_type){
+                                      error!("Bad type during declaration of variable for {}, {:?} instead of {:?}", declarator_interpreter.identifier.clone(), value, &*inside_type);
+                                      return Err(IncorrectTypeDeclaration(format!("Bad type during declaration of variable for {}, {:?} instead of {:?}",  declarator_interpreter.identifier.clone(), value, &*inside_type)));
+                                  }
+                              };
+                          },
+                          _ => unreachable!()
+                        };
+                        let index = self.memory_manager.add_array(&values)?;
+                        self.memory_manager.create_value(&declarator_interpreter.identifier, MemoryValue::Pointer(inside_type, index));
+                    },
+                    MemoryValue::Pointer(_, _) => { self.memory_manager.create_value(&declarator_interpreter.identifier, values); }
+                    MemoryValue::String(_) => {unreachable!()}
+                    MemoryValue::Null => {self.memory_manager.create_value(&declarator_interpreter.identifier, values);}
+                    MemoryValue::Unit => {self.memory_manager.create_value(&declarator_interpreter.identifier, values);}
+                    _ => {}
+                };
+                //self.memory_manager.create_value(&declarator_interpreter.identifier, values);
             }else{
                 // create default value
                 let default_value = match &local_specifier{
@@ -1550,10 +1768,11 @@ impl Interpreter {
                     SpecifierInterpreter::Pointer(pointer_type) => {
                         if declarator_interpreter.array_sizes.len() == 1{
                             let default_value = pointer_type.default_value()?;
-                            let index = self.memory_manager.add_array(default_value, declarator_interpreter.array_sizes[0])?;
+                            let size_array = declarator_interpreter.array_sizes[0].ok_or(InvalidValueForArraySize)?;
+                            let index = self.memory_manager.add_array_default(default_value, size_array)?;
                             Ok(MemoryValue::Pointer(*pointer_type.clone(), index))
-                        }else if declarator_interpreter.n_pointers == 1{
-                            Err(NotImplemented)
+                        }else if declarator_interpreter.n_pointers > 0 && declarator_interpreter.array_sizes.len() == 0{
+                            local_specifier.default_value()
                         }else{
                             Err(NotImplemented)
                         }
@@ -1607,7 +1826,7 @@ impl Interpreter {
         let for_statement = &for_statement.node;
         match &for_statement.initializer.node {
             ForInitializer::Empty => {return Err(NotImplemented)},
-            ForInitializer::Expression(_) => {return Err(NotImplemented)}, //TODO implement this
+            ForInitializer::Expression(expression) => {let _ = self.expression_value(expression);}, 
             ForInitializer::Declaration(declaration) => {self.declaration(&declaration)?;}
             ForInitializer::StaticAssert(_) => {return Err(NotImplemented)}
         }
@@ -1698,6 +1917,7 @@ fn print_c_format(string: String, values: Vec<MemoryValue>) -> Result<(), ErrorI
             MemoryValue::String(value) => {value.to_string()},
             MemoryValue::Null => {"null".to_string()},
             MemoryValue::Unit => {"unit".to_string()},
+            MemoryValue::Array(_,_) => unreachable!()
         };
         let new_part = part.clone().replace(r"\n", "\n");
         print!("{}{}", new_part , value);
@@ -1706,10 +1926,22 @@ fn print_c_format(string: String, values: Vec<MemoryValue>) -> Result<(), ErrorI
     Ok(())
 }
 
+
+/// Simple program to greet a person
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Path to the c file to interpret
+    #[arg(short, long, default_value = "./c_programs/test.c")]
+    path: String,
+}
+
+
 fn main() {
     env_logger::init();
+    let args = Args::parse();
     let mut interpreter = Interpreter::new();
-    let res = interpreter.run("./c_programs/test.c");
+    let res = interpreter.run(args.path);
     println!("{:?}", res);
 }
 
@@ -1763,6 +1995,27 @@ mod tests {
         let res = interpreter.run("./c_programs/tests/for_loop.c");
         assert_eq!(res, MemoryValue::Int(20));
     }
+    #[test]
+    fn bubble_sort(){
+        let mut interpreter = Interpreter::new();
+        let res = interpreter.run("./c_programs/tests/bubble_sort.c");
+        assert_eq!(res, MemoryValue::Int(6));
+    }
+
+    #[test]
+    fn course_example(){
+        let mut interpreter = Interpreter::new();
+        let res = interpreter.run("./c_programs/tests/example.c");
+        assert_eq!(res, MemoryValue::Float(45.0));
+    }
+
+    #[test]
+    fn pointers(){
+        let mut interpreter = Interpreter::new();
+        let res = interpreter.run("./c_programs/tests/pointers.c");
+        assert_eq!(res, MemoryValue::Float(45.0));
+    }
+    
 }
 
 
