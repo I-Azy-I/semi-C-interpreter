@@ -6,7 +6,7 @@ use lang_c::driver::{parse, Config};
 use lang_c::visit::Visit;
 use std::collections::HashMap;
 use std::hash::Hash;
-use lang_c::span::{Node, Span};
+use lang_c::span::Node;
 use std::any::{Any, TypeId};
 use std::cmp::PartialEq;
 use std::convert::identity;
@@ -14,18 +14,18 @@ use std::fmt::format;
 use std::path::Path;
 use std::process::id;
 use std::str::FromStr;
+use std::thread::Scope;
 use lang_c::ast;
 use log::{debug, error, info, warn};
 use env_logger::{Logger, Env};
 use lang_c::ast::{ArrayDeclarator, ArraySize, BinaryOperator, BinaryOperatorExpression, Constant, DerivedDeclarator, FloatBase, ForInitializer, IntegerBase, SpecifierQualifier, UnaryOperator, UnaryOperatorExpression};
 use std::mem::discriminant;
-use colored::Colorize;
+
 use clap::Parser;
-use std::{thread, time};
-use std::io::stdin;
-use std::thread::sleep;
+
 use crate::ErrorInterpreter::*;
-use crate::SymbolTableKind::Restricted;
+
+
 
 const PRINT_MEMORY: bool = false;
 const STACK_SIZE: usize = 1000000;
@@ -90,8 +90,7 @@ enum ErrorInterpreter{
     WhatHaveYouDone,
     ImpossibleToAssignValueToAddress,
     ImpossibleToGetValueFromAddress,
-    ImpossibleToGetAddressOfAValue,
-    VariableAlreadyExist
+    ImpossibleToGetAddressOfAValue
 
 }
 type Int = i64;
@@ -101,7 +100,7 @@ enum MemoryValue {
     Int(i64),
     Float(f64),
     Char(char),
-    Array(SpecifierInterpreter, Vec<MemoryValue>), // only used for declaration of arrays
+    Array(SpecifierInterpreter, Vec<MemoryValue>), // only used for decalaration of arrays
     Pointer(SpecifierInterpreter,usize),
     String(String),
     Null,
@@ -395,7 +394,6 @@ impl<'a, T: Hash + Eq, U> SymbolTable<T, U>{
     }
 }
 #[derive(Debug, Clone)]
-#[derive(PartialEq)]
 enum SymbolTableKind {
     Restricted,
     Scoped
@@ -465,19 +463,16 @@ impl MemoryManager{
         }
     }
 
-    fn create_value(&mut self, identifier: &Identifier, value: MemoryValue) -> Result<MemoryIndex, ErrorInterpreter>{
+    fn create_value(&mut self, identifier: &Identifier, value: MemoryValue) -> MemoryIndex{
         debug!("MEMORY_STATE_BEFORE CREATE {:?} {:?}", identifier, value);
         self.print_state();
-        if self.current_symbol_table().current.contains_key(&identifier.clone()){
-            return Err(VariableAlreadyExist)
-        }
         let memory_id = self.memory.add(value);
         self.current_symbol_table_mut().save_key(identifier.clone(), memory_id);
         debug!("MEMORY_STATE_AFTER CREATE");
         debug!("{}", self.build_state());
         debug!("SYMBOL TABLES");
         debug!("{:?}", self.symbol_tables);
-        Ok(memory_id)
+        memory_id
     }
     fn change_value(&mut self, identifier: &Identifier, value: MemoryValue) -> Result<MemoryValue, ErrorInterpreter> {
         debug!("MEMORY_STATE_BEFORE CHANGE {:?} {:?}", identifier, value);
@@ -623,94 +618,16 @@ fn extract_identifier_from_declarator(declarator: &ast::Declarator) -> Result<Id
         }
     }
 }
-
-struct Debug{
-    memory_state: bool,
-    source_span: bool,
-    print_back: usize,
-    sleep_time: usize,
-    auto: bool,
-}
 struct Interpreter  {
     functions: EnvFunction,
     memory_manager: MemoryManager,
-    current_span: Span,
-    source: String,
-    debug: Debug
-
 }
 impl Interpreter {
     fn new() -> Self {
         Interpreter { 
             functions: EnvFunction::new(),
             memory_manager: MemoryManager::new(),
-            current_span: Span::none(),
-            source: "".to_string(),
-            debug: Debug{memory_state: false, source_span: false, print_back: 0, sleep_time: 500, auto: true }
         }
-    }
-    fn source_highlight(&self) -> String {
-        let (start, _middle) = self.source.split_at(self.current_span.start);
-        let (middle, end) = _middle.split_at(self.current_span.end-self.current_span.start);
-        let whole_string = format!("{}{}{}",start,middle.red(),end);
-        let mut first_non_hash_found = false;
-        let result: String = whole_string
-            .lines()
-            .filter(|line| {
-                if first_non_hash_found {
-                    true // Include lines after the first non-`#` line
-                } else if !line.trim_start().starts_with('#') {
-                    first_non_hash_found = true; // Found the first non-`#` line
-                    true
-                } else {
-                    false // Skip lines starting with `#`
-                }
-            })
-            .collect::<Vec<&str>>()
-            .join("\n");
-        result
-    }
-    fn state_memory(&mut self) -> String {
-        let mut result = String::new();
-        for (i, table) in self.memory_manager.symbol_tables.clone().iter().enumerate() {
-            let mut line = format!("Symbol table {}{}:", i, if table.kind == Restricted {" restricted"} else {""});
-            for (name, address) in table.current.clone() {
-                line = format!("{} {}={:?} |",line, name, self.memory_manager.get_from_index(address));
-            }
-            result = format!("{}{}\n", result, line)
-        };
-        result
-    }
-    fn print_debug(&mut self) {
-        if !self.debug.memory_state && !self.debug.source_span {return;}
-        let mut debug_string = "".to_string();
-        if self.debug.source_span {
-            debug_string.push_str("=== SOURCE ===\n");
-            debug_string.push_str(&self.source_highlight());
-        }
-
-        if self.debug.memory_state {
-            debug_string.push_str("\n=== MEMORY STATE ===\n");
-            debug_string.push_str(&self.state_memory());
-        }
-        debug_string.push_str("\n");
-        if self.debug.auto {
-            let duration = time::Duration::from_millis(self.debug.sleep_time as u64);
-            thread::sleep(duration);
-        } else {
-            let mut _s = String::new();
-            let _ = stdin().read_line(&mut _s);
-            self.debug.print_back += 1;
-        }
-        print!("{}", "\x1b[A".repeat(self.debug.print_back));
-        print!("{}", "                                                            \n".repeat(self.debug.print_back));
-        print!("{}", "\x1b[A".repeat(self.debug.print_back));
-        self.debug.print_back = debug_string.lines().count();
-        print!("{}", debug_string);
-    }
-    fn update_span(&mut self, span: Span) {
-        self.current_span = span;
-        self.print_debug();
     }
     fn get_value_no_array(&self, identifier: &Identifier) -> Result<MemoryValue, ErrorInterpreter> {
         if let Some(value) = self.memory_manager.get_value(&identifier){
@@ -721,25 +638,14 @@ impl Interpreter {
         }
     }
     fn get_value(&mut self, identifier: &IdentifierData) -> Result<MemoryValue, ErrorInterpreter> {
-        debug!("get_value");
-        if identifier.depth < 0{
+        if identifier.depth < 0 ||(identifier.array_index.is_some() && identifier.depth == 0){
             return Err(ImpossibleToGetValueFromAddress)
         };
-        if (identifier.array_index.is_some() && identifier.depth == 0) {
-            if let Some(array_index) = identifier.array_index{
-                let pointer = self.get_value_no_array(&identifier.identifier)?;
-                match pointer {
-                    MemoryValue::Pointer(type_pointer, address) => { Ok(MemoryValue::Pointer(type_pointer, address + array_index)) }
-                    _ => Err(ImpossibleToGetValueFromAddress)
-                }
-            }else{
-                unreachable!()
-            }
-        } else if identifier.depth > 0{
+        if identifier.depth > 0{
             if let Some(array_index) = identifier.array_index{
                 self.get_value_from_pointer(&identifier.identifier, array_index, identifier.depth as usize)
-            }else{
-                self.get_value_from_pointer(&identifier.identifier, 0, identifier.depth as usize)
+            }else{ 
+                unreachable!()
             }
         }else{
             self.get_value_no_array(&identifier.identifier)
@@ -834,13 +740,11 @@ impl Interpreter {
     }
     fn get_function_name(&mut self, function_def: &ast::FunctionDefinition) -> Result<Identifier, ErrorInterpreter>{
         let declarator = &function_def.declarator;
-        self.update_span(declarator.span);
         Ok(self.declarator(&declarator)?.identifier)
     }
 
     fn get_function_arguments(&mut self, function_def: &ast::FunctionDefinition) -> Result<Vec<FunctionArgument>, ErrorInterpreter>{
         let declarator = &function_def.declarator.node;
-        self.update_span(function_def.declarator.span);
         let nodes_arg = &declarator.derived;
         let nodes_arg = &nodes_arg.iter().find(
             |derived_decl_node|
@@ -880,12 +784,10 @@ impl Interpreter {
             }
         }
     }
-    fn get_function_body(&mut self, function_def: &ast::FunctionDefinition) -> Result<Node<Body>,ErrorInterpreter>{
-        self.update_span(function_def.statement.span);
+    fn get_function_body(&self, function_def: &ast::FunctionDefinition) -> Result<Node<Body>,ErrorInterpreter>{
         Ok(function_def.statement.clone())
     }
     fn get_return_specifier(&mut self, function_def: &ast::FunctionDefinition ) -> Result<SpecifierInterpreter,ErrorInterpreter>{
-        self.update_span(function_def.statement.span);
         let declarator = &function_def.declarator.node;
         let nodes_arg = &declarator.derived;
         let pointer_count = nodes_arg.iter().fold(0 as usize,
@@ -956,7 +858,7 @@ impl Interpreter {
                     } else {
                         continue
                     };
-                    self.memory_manager.create_value(argument_identifier, variable_values)?;
+                    self.memory_manager.create_value(argument_identifier, variable_values);
                 }
             } else {
                 self.memory_manager.push_scope(SymbolTableKind::Restricted);
@@ -982,7 +884,7 @@ impl Interpreter {
         let config = Config::default();
         info!("Parsing file: {} ...", file_name.as_ref().display());
         let parse = parse(&config, file_name).expect("Error in file c");
-        self.source = parse.source;
+        
         let translation_unit = parse.unit;
         let functions = translation_unit.0;
         info!("fetching functions...");
@@ -1015,9 +917,6 @@ impl Interpreter {
             ReturnCalled(memory_value) => Ok(memory_value),
             other => Err(other)
         });
-        debug!("Memory State at the end: ");
-        debug!("{:?}", self.memory_manager.symbol_tables);
-        debug!("{}", self.memory_manager.build_state());
         match result {
             Ok(value) => {
                 info!("Program completed successfully");
@@ -1029,7 +928,6 @@ impl Interpreter {
                 MemoryValue::Unit
             }
         }
-
     }
     
     fn get_pointer_content(&mut self, memory_index: MemoryIndex) -> Result<MemoryValue, ErrorInterpreter> {
@@ -1096,7 +994,6 @@ impl Interpreter {
     
     fn derived_declarator(&mut self, derived_declarator_node: &Node<DerivedDeclarator>) -> Result<DerivedDeclaratorInterpreter, ErrorInterpreter> {
         debug!("derived_declarator");
-        self.update_span(derived_declarator_node.span);
         let derived_declarator = &derived_declarator_node.node;
         match derived_declarator {
             DerivedDeclarator::Pointer(pointer) => {
@@ -1120,7 +1017,6 @@ impl Interpreter {
     }
     fn declarator(&mut self, declarator_node: &Node<ast::Declarator>) -> Result<DeclaratorInterpreter, ErrorInterpreter> {
         debug!("Declarator");
-        self.update_span(declarator_node.span);
         let declarator = &declarator_node.node;
         let derived_list = &declarator.derived;
         let mut declarator_interpreter = DeclaratorInterpreter{
@@ -1148,7 +1044,6 @@ impl Interpreter {
     }
     fn binary_operator_expression_identifier(&mut self, binary_operator_expression_node: &Node<BinaryOperatorExpression>) -> Result<IdentifierData, ErrorInterpreter> {
         debug!("binary_operator_expression_identifier");
-        self.update_span(binary_operator_expression_node.span);
         let binary_operator_expression = &binary_operator_expression_node.node;
         match binary_operator_expression.operator.node {
             BinaryOperator::Index => {
@@ -1160,15 +1055,10 @@ impl Interpreter {
                     _ => return Err(InvalidValueForArraySize)
                 };
                 lhs.array_index = array;
-                lhs.depth += 1;
+                lhs.depth = 1;
                 Ok(lhs)
-            },
-            
-            
-            _ => {
-                
-                Err(NoIdentifierCanBeExtract)
             }
+            _ => Err(NoIdentifierCanBeExtract)
         } 
     }
     fn get_operand_value(&mut self, lhs: &IdentifierData) -> Result<MemoryValue, ErrorInterpreter> {
@@ -1179,7 +1069,6 @@ impl Interpreter {
     }
     fn binary_operator_expression_value(&mut self, binary_operator_expression_node: &Node<BinaryOperatorExpression>) -> Result<MemoryValue, ErrorInterpreter> {
         debug!("binary_operator_expression_value");
-        self.update_span(binary_operator_expression_node.span);
         let binary_operator_expression = &binary_operator_expression_node.node;
         match binary_operator_expression.operator.node{
             BinaryOperator::Index => {
@@ -1533,8 +1422,6 @@ impl Interpreter {
         }
     }
     fn constant(&mut self, constant_node: &Node<ast::Constant>) -> Result<MemoryValue,ErrorInterpreter> {
-        debug!("Constant");
-        self.update_span(constant_node.span);
         let constant = &constant_node.node;
         match constant{
             Constant::Integer(value) => {
@@ -1564,7 +1451,6 @@ impl Interpreter {
     }
     fn unary_operator(&mut self, unary_operator_node: &Node<ast::UnaryOperatorExpression>) -> Result<MemoryValue, ErrorInterpreter> {
         debug!("unary_operator");
-        self.update_span(unary_operator_node.span);
         let unary_operator = &unary_operator_node.node;
        
         match unary_operator.operator.node{
@@ -1662,7 +1548,7 @@ impl Interpreter {
                     let pointer_specifier = self.get_value(&identifier)?.get_specifier()?;
                     Ok(MemoryValue::Pointer(pointer_specifier, index))
                 }else if identifier.depth > 0 {
-                    identifier.depth -= 1; //TODP
+                    identifier.depth -= 1;
                     self.get_value(&identifier)
                 }else{
                     Err(ImpossibleToGetAddressOfAValue)
@@ -1685,7 +1571,6 @@ impl Interpreter {
 
     fn specifier_qualifier(&mut self, specifier_quantifier_node: &Node<ast::SpecifierQualifier>) -> Result<SpecifierInterpreter, ErrorInterpreter>{
         debug!("specifier_qualifier");
-        self.update_span(specifier_quantifier_node.span);
         let specifier_quantifier = &specifier_quantifier_node.node;
         match specifier_quantifier{
             SpecifierQualifier::TypeSpecifier(node) => SpecifierInterpreter::fromNode(node),
@@ -1697,7 +1582,6 @@ impl Interpreter {
 
     fn type_name(&mut self, type_name_node: &Node<ast::TypeName>) -> Result<SpecifierInterpreter, ErrorInterpreter> {
         debug!("type_name");
-        self.update_span(type_name_node.span);
         let type_name = &type_name_node.node;
         if type_name.specifiers.is_empty(){
             return Err(NotTypeSpecifierInTypeName)
@@ -1712,7 +1596,6 @@ impl Interpreter {
     }
     fn cast_expression(&mut self, cast_expression_node: &Node<ast::CastExpression>) -> Result<MemoryValue, ErrorInterpreter>{
         debug!("cast_expression");
-        self.update_span(cast_expression_node.span);
         let cast_expression = &cast_expression_node.node;
         let specifier = self.type_name(&cast_expression.type_name)?;
         let value = self.expression_value(&cast_expression.expression)?;
@@ -1729,7 +1612,6 @@ impl Interpreter {
     }
     fn call_expression(&mut self, call_expression_node: &Node<ast::CallExpression>) -> Result<MemoryValue, ErrorInterpreter> {
         debug!("call_expression");
-        self.update_span(call_expression_node.span);
         let call_expression = &call_expression_node.node;
         let identifier = self.expression_identifier(&call_expression.callee)?;
         let arguments: Result<Vec<MemoryValue>, ErrorInterpreter> = call_expression.arguments.iter().map(|node| self.expression_value(&node)).collect();
@@ -1742,7 +1624,6 @@ impl Interpreter {
     }
     fn expression_value(&mut self, expression_node: &Node<ast::Expression>) -> Result<MemoryValue, ErrorInterpreter> {
         debug!("expression_value");
-        self.update_span(expression_node.span);
         let expression = &expression_node.node;
         match expression {
             ast::Expression::Identifier(identifier) => {
@@ -1769,7 +1650,6 @@ impl Interpreter {
     }
     fn expression_identifier(&mut self, expression_node: &Node<ast::Expression>) -> Result<IdentifierData, ErrorInterpreter> {
         debug!("expression_identifier");
-        self.update_span(expression_node.span);
         let expression = &expression_node.node;
         match expression {
             ast::Expression::Identifier(identifier) => Ok(IdentifierData::from_identifier(identifier.node.name.clone())),
@@ -1798,7 +1678,6 @@ impl Interpreter {
     }
     fn initializer(&mut self, initializer_node: &Node<ast::Initializer>) -> Result<MemoryValue, ErrorInterpreter> {
         debug!("initializer");
-        self.update_span(initializer_node.span);
         let initializer = &initializer_node.node;
         match initializer {
             ast::Initializer::Expression(expression) => {self.expression_value(&expression)}
@@ -1834,7 +1713,6 @@ impl Interpreter {
     }
     fn declaration(&mut self, declaration_node: &Node<ast::Declaration>) -> Result<MemoryValue, ErrorInterpreter> {
         debug!("Declaration");
-        self.update_span(declaration_node.span);
         let declaration = &declaration_node.node;
         //int i;
         let specifier = SpecifierInterpreter::fromVecDeclaration(&declaration.specifiers)?;
@@ -1847,8 +1725,8 @@ impl Interpreter {
                   return Err(IncorrectTypeDeclaration(format!("Bad type during declaration of variable for {}, {:?} instead of {:?}",  declarator_interpreter.identifier.clone(), values, local_specifier)));
                 }
                 match values{
-                    MemoryValue::Int(_) => {self.memory_manager.create_value(&declarator_interpreter.identifier, values)?;}
-                    MemoryValue::Float(_) => {self.memory_manager.create_value(&declarator_interpreter.identifier, values)?;}
+                    MemoryValue::Int(_) => {self.memory_manager.create_value(&declarator_interpreter.identifier, values);}
+                    MemoryValue::Float(_) => {self.memory_manager.create_value(&declarator_interpreter.identifier, values);}
                     MemoryValue::Array(inside_type, values) => {
                         if declarator_interpreter.array_sizes[0].ok_or(InvalidValueForArraySize)? != values.len(){
                             return Err(NotSameSizeArrayAndDeclarationOfArray);
@@ -1865,12 +1743,12 @@ impl Interpreter {
                           _ => unreachable!()
                         };
                         let index = self.memory_manager.add_array(&values)?;
-                        self.memory_manager.create_value(&declarator_interpreter.identifier, MemoryValue::Pointer(inside_type, index))?;
+                        self.memory_manager.create_value(&declarator_interpreter.identifier, MemoryValue::Pointer(inside_type, index));
                     },
-                    MemoryValue::Pointer(_, _) => { self.memory_manager.create_value(&declarator_interpreter.identifier, values)?; }
+                    MemoryValue::Pointer(_, _) => { self.memory_manager.create_value(&declarator_interpreter.identifier, values); }
                     MemoryValue::String(_) => {unreachable!()}
-                    MemoryValue::Null => {self.memory_manager.create_value(&declarator_interpreter.identifier, values)?;}
-                    MemoryValue::Unit => {self.memory_manager.create_value(&declarator_interpreter.identifier, values)?;}
+                    MemoryValue::Null => {self.memory_manager.create_value(&declarator_interpreter.identifier, values);}
+                    MemoryValue::Unit => {self.memory_manager.create_value(&declarator_interpreter.identifier, values);}
                     _ => {}
                 };
                 //self.memory_manager.create_value(&declarator_interpreter.identifier, values);
@@ -1895,14 +1773,13 @@ impl Interpreter {
                         }
                     }
                 }?;
-                self.memory_manager.create_value(&declarator_interpreter.identifier, default_value)?;
+                self.memory_manager.create_value(&declarator_interpreter.identifier, default_value);
             }
         };
         Ok(MemoryValue::Unit)
     }
     fn block_item(&mut self, block_item_node: &Node<ast::BlockItem>) -> Result<MemoryValue, ErrorInterpreter>{
         debug!("block_item");
-        self.update_span(block_item_node.span);
         let block_item = &block_item_node.node;
         match block_item {
             ast::BlockItem::Declaration(declaration) => self.declaration(declaration),
@@ -1912,16 +1789,13 @@ impl Interpreter {
     }
     fn compound(&mut self, compound: &Vec<Node<ast::BlockItem>>) -> Result<MemoryValue, ErrorInterpreter> {
         debug!("compound");
-        self.memory_manager.push_scope(SymbolTableKind::Scoped);
         for block_item in compound{
             let _ = self.block_item(&block_item)?;
         }
-        self.memory_manager.free_scope();
         Ok(MemoryValue::Unit)
     }
     fn if_statement(&mut self, if_statement: &Node<ast::IfStatement>) -> Result<MemoryValue, ErrorInterpreter> {
         debug!("if_statement");
-        self.update_span(if_statement.span);
         let if_statement = &if_statement.node;
         let condition = self.expression_value(&if_statement.condition)?.evaluate_boolean_value()?;
         if condition {
@@ -1943,7 +1817,6 @@ impl Interpreter {
     }
     fn for_statement(&mut self, for_statement: &Node<ast::ForStatement>) -> Result<MemoryValue, ErrorInterpreter> {
         debug!("for_statement");
-        self.update_span(for_statement.span);
         self.memory_manager.push_scope(SymbolTableKind::Scoped);
         let for_statement = &for_statement.node;
         match &for_statement.initializer.node {
@@ -1972,7 +1845,6 @@ impl Interpreter {
     }
     fn while_statement(&mut self, while_statement_node: &Node<ast::WhileStatement>) -> Result<MemoryValue, ErrorInterpreter> {
         debug!("for_statement");
-        self.update_span(while_statement_node.span);
         let while_statement = &while_statement_node.node;
         
         while self.expression_value(&while_statement.expression)?.evaluate_boolean_value()? {
@@ -1992,9 +1864,8 @@ impl Interpreter {
 
     }
     fn statement(&mut self, statement: &Node<ast::Statement>) -> Result<MemoryValue, ErrorInterpreter> {
-        debug!("statement");
-        self.update_span(statement.span);
         let statement = &statement.node;
+        debug!("statement");
         let value = match statement {
             ast::Statement::Compound(comp) => self.compound(comp),
             ast::Statement::Expression(expression) => self.expression_value(expression.as_ref().unwrap()),
@@ -2064,15 +1935,7 @@ struct Args {
 fn main() {
     env_logger::init();
     let args = Args::parse();
-    let debug = Debug{
-        memory_state: true,
-        source_span: true,
-        print_back: 0,
-        sleep_time: 500,
-        auto: false,
-    };
     let mut interpreter = Interpreter::new();
-    interpreter.debug = debug;
     let res = interpreter.run(args.path);
     println!("{:?}", res);
 }

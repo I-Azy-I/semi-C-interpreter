@@ -5,7 +5,7 @@ float avg(int count, int *value) {
   for (int i = 0; i < count; i++) {  // Starting from 0 to include all elements
     total += value[i];
   }
-  return (float) total / count;  // Return a float for average
+  return (float) total /  count;  // Return a float for average
 }
 
 int main(void) {
@@ -19,7 +19,7 @@ int main(void) {
     sum = sum + mark[i];
     average = avg(i + 1, mark);
     if (average > 40) {
-      printf("%f", average);  // Corrected quotation marks and format
+      return average;
     }
   }
 }
