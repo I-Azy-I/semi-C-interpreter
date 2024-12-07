@@ -19,7 +19,7 @@ int main(void) {
     sum = sum + mark[i];
     average = avg(i + 1, mark);
     if (average > 40) {
-      printf(average);  // Corrected quotation marks and format
+      return average;
     }
   }
 }
