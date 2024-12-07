@@ -1,3 +1,8 @@
+use lang_c::driver::{parse, Config};
+
 fn main() {
-    println!("Hello, world!");
+    let config = Config::default();
+    let parse = parse(&config, "c_programs/test.c").expect("Error in file c").unit;
+    println!("{:#?}", parse);
+    
 }
