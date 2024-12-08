@@ -1,29 +1,18 @@
-extern crate core;
-
-mod parser;
-
 use lang_c::driver::{parse, Config};
-use lang_c::visit::Visit;
 use std::collections::HashMap;
 use std::hash::Hash;
 use lang_c::span::{Node, Span};
 use std::any::{Any, TypeId};
 use std::cmp::PartialEq;
-use std::convert::identity;
-use std::fmt::format;
 use std::path::Path;
-use std::process::id;
-use std::str::FromStr;
 use lang_c::ast;
 use log::{debug, error, info, warn};
-use env_logger::{Logger, Env};
-use lang_c::ast::{ArrayDeclarator, ArraySize, BinaryOperator, BinaryOperatorExpression, Constant, DerivedDeclarator, FloatBase, ForInitializer, IntegerBase, SpecifierQualifier, UnaryOperator, UnaryOperatorExpression};
+use lang_c::ast::{ArraySize, BinaryOperator, BinaryOperatorExpression, Constant, DerivedDeclarator, FloatBase, ForInitializer, IntegerBase, SpecifierQualifier, UnaryOperator};
 use std::mem::discriminant;
 use colored::Colorize;
 use clap::Parser;
 use std::{thread, time};
 use std::io::stdin;
-use std::thread::sleep;
 use crate::ErrorInterpreter::*;
 use crate::SymbolTableKind::Restricted;
 
@@ -35,7 +24,7 @@ enum ErrorInterpreter{
     TypeConversion,
     NotAFunction,
     UnreachableReached,
-    MissingArgumentsFunction,
+    // MissingArgumentsFunction,
     SpecifierNotImplemented,
     ParsingError,
     FunctionNotFounded(String),
@@ -92,10 +81,73 @@ enum ErrorInterpreter{
     ImpossibleToGetValueFromAddress,
     ImpossibleToGetAddressOfAValue,
     VariableAlreadyExist
-
 }
-type Int = i64;
-type Float = f64;
+impl ErrorInterpreter{
+    fn error_message(&self) -> String {
+        match self {
+            NotImplemented => "This feature is not implemented yet".to_string(),
+            TypeConversion => "Unable to perform type conversion".to_string(),
+            NotAFunction => "This identifier is not a function".to_string(),
+            UnreachableReached => "Reached unreachable code".to_string(),
+            SpecifierNotImplemented => "This specifier is not implemented".to_string(),
+            ParsingError => "Error occurred while parsing".to_string(),
+            FunctionNotFounded(name) => format!("Function '{}' not found", name),
+            IncorrectNumberOfArguments(msg) => format!("Incorrect number of arguments: {}", msg),
+            IdentifierNotFoundInMemory(id) => format!("Identifier '{}' not found in memory", id),
+            IncorrectTypeOfArguments(msg) => format!("Incorrect type of arguments: {}", msg),
+            IncorrectTypeDeclaration(msg) => format!("Incorrect type declaration: {}", msg),
+            IncorrectTypeBinaryOperation(msg) => format!("Incorrect type in binary operation: {}", msg),
+            InvalidMultiplication => "Invalid multiplication operation".to_string(),
+            IndexOutOfBounds => "Array index out of bounds".to_string(),
+            ModuloByZero => "Cannot perform modulo by zero".to_string(),
+            DivisionByZero => "Cannot divide by zero".to_string(),
+            InvalidDivision => "Invalid division operation".to_string(),
+            InvalidModulo => "Invalid modulo operation".to_string(),
+            InvalidAddition => "Invalid addition operation".to_string(),
+            InvalidSubtraction => "Invalid subtraction operation".to_string(),
+            InvalidBitShift => "Invalid bit shift operation".to_string(),
+            InvalidComparison => "Invalid comparison operation".to_string(),
+            InvalidBitwiseOperation => "Invalid bitwise operation".to_string(),
+            InvalidLogicalOperation => "Invalid logical operation".to_string(),
+            BaseNotSupported => "This numerical base is not supported".to_string(),
+            InvalidType(t) => format!("Invalid type: {}", t),
+            InvalidInt => "Invalid integer value".to_string(),
+            InvalidPlusOperator => "Invalid use of plus operator".to_string(),
+            InvalidMinusOperator => "Invalid use of minus operator".to_string(),
+            InvalidNegateOperator => "Invalid use of negation operator".to_string(),
+            NoIndexHasBeenProvidedForArray => "No index provided for array access".to_string(),
+            InvalidValueForArraySize => "Invalid value for array size".to_string(),
+            InvalidDefaultSpecifierValueConversion => "Invalid default specifier value conversion".to_string(),
+            InitializationArrayAndPointerImpossible => "Cannot initialize array and pointer simultaneously".to_string(),
+            MultipleDimensionArrayNotImplemented => "Multiple dimension arrays are not implemented".to_string(),
+            MultiplePointerNotImplemented => "Multiple pointers are not implemented".to_string(),
+            NoIdentifierCanBeExtract => "No identifier can be extracted".to_string(),
+            NotAPointer => "This variable is not a pointer".to_string(),
+            HasToBeAIntOrFloatForBooleanEvaluation => "Boolean evaluation requires integer or float".to_string(),
+            ImpossibleToIncrement => "Cannot increment this value".to_string(),
+            ArraySizeLessThanOne => "Array size must be greater than zero".to_string(),
+            ForConditionNotDefined => "For loop condition not defined".to_string(),
+            ForStepNotDefined => "For loop step not defined".to_string(),
+            ReturnCalled(_) => "This is not an error, it should never be print in this function".to_string(),
+            BreakCalled => "This is not an error, it should never be print in this function".to_string(),
+            NotTypeSpecifierInTypeName => "No type specifier in type name".to_string(),
+            ImpossibleToCastIntoThisType(msg) => format!("Cannot cast into type: {}", msg),
+            StringUsedAsValue => "String used as value".to_string(),
+            InvalidNumberArgumentPrintf => "Invalid number of arguments for printf".to_string(),
+            InvalidArgumentsForPrintf => "Invalid arguments for printf".to_string(),
+            EmptyDeclarationArray => "Empty array declaration".to_string(),
+            ConversionValueSpecifierNotImplement => "Conversion value specifier not implemented".to_string(),
+            NotSameSizeArrayAndDeclarationOfArray => "Array size doesn't match declaration".to_string(),
+            FunctionReturnWrongType(msg) => format!("Function returned wrong type: {}", msg),
+            IndirectionOnNonPointer => "Attempted indirection on non-pointer".to_string(),
+            WhatHaveYouDone => "Unexpected error occurred".to_string(),
+            ImpossibleToAssignValueToAddress => "Cannot assign value to this address".to_string(),
+            ImpossibleToGetValueFromAddress => "Cannot get value from this address".to_string(),
+            ImpossibleToGetAddressOfAValue => "Cannot get address of this value".to_string(),
+            VariableAlreadyExist => "Variable already exists".to_string(),
+        }
+    }
+}
 #[derive(Debug, Clone)]
 enum MemoryValue {
     Int(i64),
@@ -131,7 +183,7 @@ impl MemoryValue {
             MemoryValue::Int(_) => Ok(SpecifierInterpreter::Int),
             MemoryValue::Float(_) => Ok(SpecifierInterpreter::Float),
             MemoryValue::Pointer(pointer_type_value,_) => Ok(SpecifierInterpreter::Pointer(Box::new(pointer_type_value.clone()))),
-            MemoryValue::Array(pointer_type_value,_) => unreachable!(),
+            MemoryValue::Array(_pointer_type_value, _) => unreachable!(),
             _ => Err(ConversionValueSpecifierNotImplement)
         }
     }
@@ -177,23 +229,7 @@ impl MemoryValue {
         }
     }
 }
-struct Value{
-    value: MemoryValue,
-    index: Option<usize>,
-}
 
-impl Value {
-    fn same_type_specifier(&self, specifier: &SpecifierInterpreter) -> bool {
-        match (&self.value, specifier) {
-            (MemoryValue::Int(_), SpecifierInterpreter::Int) => true,
-            (MemoryValue::Float(_), SpecifierInterpreter::Float) => true,
-            //(MemoryValue::Array(spec_value, _), SpecifierInterpreter::Array(spec_spec)) => *spec_value == **spec_spec,
-            (MemoryValue::Pointer(pointer_type_value, _), SpecifierInterpreter::Pointer(pointer_type_spec)) => *pointer_type_value == **pointer_type_spec,
-            _ => false
-        }
-    }
-
-}
 
 #[derive(Debug, PartialEq, Clone)]
 enum SpecifierInterpreter {
@@ -215,10 +251,9 @@ impl SpecifierInterpreter {
                 warn!("Pointer set to null because not initialized");
                 Ok(MemoryValue::Pointer(*type_pointed.clone(), 0))
             }
-            _ => Err(InvalidDefaultSpecifierValueConversion),
         }
     }
-    fn fromNode(specifier: &Node<ast::TypeSpecifier>) -> Result<SpecifierInterpreter, ErrorInterpreter>{
+    fn from_node(specifier: &Node<ast::TypeSpecifier>) -> Result<SpecifierInterpreter, ErrorInterpreter>{
         let specifier = &specifier.node;
         match specifier{
             &ast::TypeSpecifier::Int=>Ok(SpecifierInterpreter::Int),
@@ -227,7 +262,7 @@ impl SpecifierInterpreter {
             _=>Err(SpecifierNotImplemented)
         }
     }
-    fn fromVecDeclaration(declaration_specifiers: &Vec<Node<ast::DeclarationSpecifier>>) -> Result<SpecifierInterpreter, ErrorInterpreter>{
+    fn from_vec_declaration(declaration_specifiers: &Vec<Node<ast::DeclarationSpecifier>>) -> Result<SpecifierInterpreter, ErrorInterpreter>{
         if declaration_specifiers.len() != 1{
             warn!("Only 1 specifier can be use (no const, ..)")
         };
@@ -244,7 +279,7 @@ impl SpecifierInterpreter {
                 let decl_specifier = &specifier.node;
                 match decl_specifier {
                     ast::DeclarationSpecifier::TypeSpecifier(specifier) => {
-                        Ok(SpecifierInterpreter::fromNode(specifier))?
+                        Ok(SpecifierInterpreter::from_node(specifier))?
                     }
                     _ => {
                         warn!("Fetcher of specifier got a false positive");
@@ -595,36 +630,18 @@ fn convert_node_type<T: 'static, A: 'static>(node: &Node<T>) -> Result<&A, Error
         Err(ErrorInterpreter::TypeConversion)
     }
 }
-fn is_node_of_type<T: 'static, A: 'static>(_: &Node<T>) -> bool {
+fn _is_node_of_type<T: 'static, A: 'static>(_: &Node<T>) -> bool {
     println!("is_node_of_type");
     TypeId::of::<T>() == TypeId::of::<A>()
 }
-fn is_node_of_correct_declaration<T: PartialEq + 'static, A: PartialEq + 'static>(node: &Node<T>, pattern: A) -> bool {
-    if !is_node_of_type::<T,A>(node){return false};
+
+fn _is_node_of_correct_declaration<T: PartialEq + 'static, A: PartialEq + 'static>(node: &Node<T>, pattern: A) -> bool {
+    if !_is_node_of_type::<T,A>(node){return false};
     let declaration= convert_node_type::<T,A>(node).expect("Could not convert node type, should never happen");
     declaration == &pattern
 }
 
-
-
-fn extract_identifier_from_declarator(declarator: &ast::Declarator) -> Result<Identifier, ErrorInterpreter>{
-    let kind = &declarator.kind.node;
-    match kind {
-        ast::DeclaratorKind::Abstract => {
-            warn!("Abstract not implemented in declarator");
-            Err(ErrorInterpreter::NotImplemented)
-        }
-        ast::DeclaratorKind::Identifier(identifier) => {
-            Ok(identifier.node.name.clone())
-        }
-       ast::DeclaratorKind::Declarator(_) => {
-            warn!("Declarator not implemented in declarator");
-            Err(ErrorInterpreter::NotImplemented)
-        }
-    }
-}
-
-struct Debug{
+struct DebugInterpreter {
     memory_state: bool,
     source_span: bool,
     print_back: usize,
@@ -636,7 +653,7 @@ struct Interpreter  {
     memory_manager: MemoryManager,
     current_span: Span,
     source: String,
-    debug: Debug
+    debug: DebugInterpreter
 
 }
 impl Interpreter {
@@ -646,7 +663,7 @@ impl Interpreter {
             memory_manager: MemoryManager::new(),
             current_span: Span::none(),
             source: "".to_string(),
-            debug: Debug{memory_state: false, source_span: false, print_back: 0, sleep_time: 500, auto: true }
+            debug: DebugInterpreter {memory_state: false, source_span: false, print_back: 0, sleep_time: 500, auto: true }
         }
     }
     fn source_highlight(&self) -> String {
@@ -725,7 +742,7 @@ impl Interpreter {
         if identifier.depth < 0{
             return Err(ImpossibleToGetValueFromAddress)
         };
-        if (identifier.array_index.is_some() && identifier.depth == 0) {
+        if identifier.array_index.is_some() && identifier.depth == 0 {
             if let Some(array_index) = identifier.array_index{
                 let pointer = self.get_value_no_array(&identifier.identifier)?;
                 match pointer {
@@ -855,7 +872,7 @@ impl Interpreter {
                 let mut function_args: Vec<FunctionArgument> = vec![];
                 for parameter in parameters {
                     let parameter = &parameter.node;
-                    let specifier = SpecifierInterpreter::fromVecDeclaration(&parameter.specifiers)?;
+                    let specifier = SpecifierInterpreter::from_vec_declaration(&parameter.specifiers)?;
                     let (identifier, specifier) = if let Some(declarator) = &parameter.declarator{
                         (Some(self.declarator(declarator)?.identifier) , self.declarator(declarator)?.to_specifier(specifier)?)
                     }else {
@@ -894,7 +911,7 @@ impl Interpreter {
                                                           DerivedDeclarator::Pointer(_) => {acc+1}
                                                           _=> acc
                                                       });
-        let mut specifier = SpecifierInterpreter::fromVecDeclaration(&function_def.specifiers)?;
+        let mut specifier = SpecifierInterpreter::from_vec_declaration(&function_def.specifiers)?;
         for _ in  0..pointer_count {
             specifier = SpecifierInterpreter::Pointer(Box::new(specifier));
         };
@@ -977,7 +994,6 @@ impl Interpreter {
         }
         
     }
-   
     fn run<P: AsRef<Path>> (&mut self, file_name: P) -> MemoryValue {
         let config = Config::default();
         info!("Parsing file: {} ...", file_name.as_ref().display());
@@ -1001,10 +1017,10 @@ impl Interpreter {
             self.functions.insert(function.0.clone(), function);
         }
         info!("functions saved");
-        let (main_identifier,main_return_specifier,  main_arguments, main_body) = if let Some(main) = self.functions.get("main"){
+        let (_main_identifier, _main_return_specifier,  _main_arguments, main_body) = if let Some(main) = self.functions.get("main"){
             main
         }else{
-            error!("No main function");
+            error!("No main function as been founded");
             panic!("No main function");
         };
 
@@ -1025,7 +1041,9 @@ impl Interpreter {
             }
             Err(err) => {
                 eprintln!("An error occurred during execution");
-                eprintln!("{:?}", err);
+                eprintln!("{}", err.error_message());
+                eprintln!("{}", self.source_highlight());
+
                 MemoryValue::Unit
             }
         }
@@ -1042,10 +1060,12 @@ impl Interpreter {
 
     fn declarator_kind(&mut self, declarator_kind_node: &Node<ast::DeclaratorKind>) -> Result<Identifier, ErrorInterpreter>{
         debug!("declarator_kind");
+        self.update_span(declarator_kind_node.span);
         let declarator_kind = &declarator_kind_node.node;
         match declarator_kind {
             ast::DeclaratorKind::Abstract => {
                 warn!("Abstract not implemented in declarator");
+                self.update_span(declarator_kind_node.span);
                 Err(NotImplemented)
             }
             ast::DeclaratorKind::Identifier(identifier) => {
@@ -1053,7 +1073,7 @@ impl Interpreter {
             }
             ast::DeclaratorKind::Declarator(_) => {
                 warn!("Declarator not implemented in declarator");
-                
+                self.update_span(declarator_kind_node.span);
                 Err(NotImplemented)
             }
         }
@@ -1099,7 +1119,7 @@ impl Interpreter {
         self.update_span(derived_declarator_node.span);
         let derived_declarator = &derived_declarator_node.node;
         match derived_declarator {
-            DerivedDeclarator::Pointer(pointer) => {
+            DerivedDeclarator::Pointer(_pointer) => {
                 Ok(DerivedDeclaratorInterpreter::Pointer)
             }
             DerivedDeclarator::Array(array) => {
@@ -1107,10 +1127,11 @@ impl Interpreter {
 
                 Ok(DerivedDeclaratorInterpreter::Array(size))
             }
-            DerivedDeclarator::Function(function_declarator) => Ok(DerivedDeclaratorInterpreter::Function),
+            DerivedDeclarator::Function(_) => Ok(DerivedDeclaratorInterpreter::Function),
             DerivedDeclarator::KRFunction(_) => Ok(DerivedDeclaratorInterpreter::Function),
             DerivedDeclarator::Block(_) => {
                 error!("Block not implemented in derived_declarator");
+                self.update_span(derived_declarator_node.span);
                 Err(NotImplemented)
             }
         }
@@ -1185,6 +1206,7 @@ impl Interpreter {
             BinaryOperator::Index => {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (&lhs, rhs) {
                     (MemoryValue::Pointer(_, index), MemoryValue::Int(v)) => {
                         self.get_pointer_content(index + v as usize)
@@ -1203,6 +1225,7 @@ impl Interpreter {
             BinaryOperator::Multiply => {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => Ok(MemoryValue::Int(l * r)),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) => Ok(MemoryValue::Float(l * r)),
@@ -1214,6 +1237,7 @@ impl Interpreter {
             BinaryOperator::Divide => {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) if r != 0 => Ok(MemoryValue::Int(l / r)),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) if r != 0.0 => Ok(MemoryValue::Float(l / r)),
@@ -1227,6 +1251,7 @@ impl Interpreter {
             BinaryOperator::Modulo => {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) if r != 0 => Ok(MemoryValue::Int(l % r)),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) if r != 0.0 => Ok(MemoryValue::Float(l % r)),
@@ -1240,6 +1265,7 @@ impl Interpreter {
             BinaryOperator::Plus => {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => Ok(MemoryValue::Int(l + r)),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) => Ok(MemoryValue::Float(l + r)),
@@ -1251,6 +1277,7 @@ impl Interpreter {
             BinaryOperator::Minus => {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => Ok(MemoryValue::Int(l - r)),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) => Ok(MemoryValue::Float(l - r)),
@@ -1262,6 +1289,7 @@ impl Interpreter {
             BinaryOperator::ShiftLeft => {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) if r >= 0 => Ok(MemoryValue::Int(l << r as u32)),
                     _ => Err(InvalidBitShift)
@@ -1270,6 +1298,7 @@ impl Interpreter {
             BinaryOperator::ShiftRight => {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) if r >= 0 => Ok(MemoryValue::Int(l >> r as u32)),
                     _ => Err(InvalidBitShift)
@@ -1278,6 +1307,7 @@ impl Interpreter {
             BinaryOperator::Less => {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => Ok(MemoryValue::Int((l < r) as i64)),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) => Ok(MemoryValue::Int((l < r) as i64)),
@@ -1289,6 +1319,7 @@ impl Interpreter {
             BinaryOperator::Greater => {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => Ok(MemoryValue::Int((l > r) as i64)),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) => Ok(MemoryValue::Int((l > r) as i64)),
@@ -1300,6 +1331,7 @@ impl Interpreter {
             BinaryOperator::LessOrEqual => {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => Ok(MemoryValue::Int((l <= r) as i64)),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) => Ok(MemoryValue::Int((l <= r) as i64)),
@@ -1311,6 +1343,7 @@ impl Interpreter {
             BinaryOperator::GreaterOrEqual => {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => Ok(MemoryValue::Int((l >= r) as i64)),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) => Ok(MemoryValue::Int((l >= r) as i64)),
@@ -1322,6 +1355,7 @@ impl Interpreter {
             BinaryOperator::Equals => {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => Ok(MemoryValue::Int((l == r) as i64)),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) => Ok(MemoryValue::Int((l == r) as i64)),
@@ -1335,6 +1369,7 @@ impl Interpreter {
             BinaryOperator::NotEquals => {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => Ok(MemoryValue::Int((l != r) as i64)),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) => Ok(MemoryValue::Int((l != r) as i64)),
@@ -1348,6 +1383,7 @@ impl Interpreter {
             BinaryOperator::BitwiseAnd => {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => Ok(MemoryValue::Int(l & r)),
                     _ => Err(InvalidBitwiseOperation)
@@ -1356,6 +1392,7 @@ impl Interpreter {
             BinaryOperator::BitwiseXor => {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => Ok(MemoryValue::Int(l ^ r)),
                     _ => Err(InvalidBitwiseOperation)
@@ -1364,24 +1401,37 @@ impl Interpreter {
             BinaryOperator::BitwiseOr => {
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => Ok(MemoryValue::Int(l | r)),
                     _ => Err(InvalidBitwiseOperation)
                 }
             }
             BinaryOperator::LogicalAnd => {
-                // TODO evaluate at first lhs
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
+                match lhs {
+                    MemoryValue::Int(l) => if l == 0{
+                        return  Ok(MemoryValue::Int(0))
+                    }
+                    _ => return Err(InvalidLogicalOperation)
+                }
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => Ok(MemoryValue::Int(((l != 0) && (r != 0)) as i64)),
                     _ => Err(InvalidLogicalOperation)
                 }
             }
             BinaryOperator::LogicalOr => {
-                // TODO evaluate at first lhs
                 let lhs = self.expression_value(&binary_operator_expression.lhs)?;
+                match lhs {
+                    MemoryValue::Int(l) => if l != 0{
+                        return  Ok(MemoryValue::Int(l))
+                    }
+                    _ => return Err(InvalidLogicalOperation)
+                }
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 match (lhs, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => Ok(MemoryValue::Int(((l != 0) || (r != 0)) as i64)),
                     _ => Err(InvalidLogicalOperation)
@@ -1397,6 +1447,7 @@ impl Interpreter {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
                 let current = self.get_operand_value(&lhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => MemoryValue::Int(l * r),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) => MemoryValue::Float(l * r),
@@ -1412,6 +1463,7 @@ impl Interpreter {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
                 let current = self.get_operand_value(&lhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) if r != 0 => MemoryValue::Int(l / r),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) if r != 0.0 => MemoryValue::Float(l / r),
@@ -1428,6 +1480,7 @@ impl Interpreter {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
                 let current = self.get_operand_value(&lhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) if r != 0 => MemoryValue::Int(l % r),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) if r != 0.0 => MemoryValue::Float(l % r),
@@ -1445,6 +1498,7 @@ impl Interpreter {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
                 let current = self.get_operand_value(&lhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => MemoryValue::Int(l + r),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) => MemoryValue::Float(l + r),
@@ -1460,6 +1514,7 @@ impl Interpreter {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
                 let current = self.get_operand_value(&lhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => MemoryValue::Int(l - r),
                     (MemoryValue::Float(l), MemoryValue::Float(r)) => MemoryValue::Float(l - r),
@@ -1475,6 +1530,7 @@ impl Interpreter {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
                 let current = self.get_operand_value(&lhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) if r >= 0 => MemoryValue::Int(l << r as u32),
                     _ => return Err(InvalidBitShift)
@@ -1487,6 +1543,7 @@ impl Interpreter {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
                 let current = self.get_operand_value(&lhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) if r >= 0 => MemoryValue::Int(l >> r as u32),
                     _ => return Err(InvalidBitShift)
@@ -1499,6 +1556,7 @@ impl Interpreter {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
                 let current = self.get_operand_value(&lhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => MemoryValue::Int(l & r),
                     _ => return Err(InvalidBitwiseOperation)
@@ -1511,6 +1569,7 @@ impl Interpreter {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
                 let current = self.get_operand_value(&lhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => MemoryValue::Int(l ^ r),
                     _ => return Err(InvalidBitwiseOperation)
@@ -1523,6 +1582,7 @@ impl Interpreter {
                 let lhs = self.expression_identifier(&binary_operator_expression.lhs)?;
                 let rhs = self.expression_value(&binary_operator_expression.rhs)?;
                 let current = self.get_operand_value(&lhs)?;
+                self.update_span(binary_operator_expression_node.span);
                 let result = match (current, rhs) {
                     (MemoryValue::Int(l), MemoryValue::Int(r)) => MemoryValue::Int(l | r),
                     _ => return Err(InvalidBitwiseOperation)
@@ -1544,7 +1604,9 @@ impl Interpreter {
                         let i: i64 = value.number.parse().map_err(|_| InvalidInt)?;
                         Ok(MemoryValue::Int(i))
                     }
-                    _ => {Err(BaseNotSupported)}
+                    _ => {
+                        self.update_span(constant_node.span);
+                        Err(BaseNotSupported)}
                 }
                 
             }
@@ -1572,7 +1634,9 @@ impl Interpreter {
                 let value = self.expression_value(&unary_operator.operand)?;
                 match value{
                     MemoryValue::Int(_) | MemoryValue::Float(_) => { Ok(value) }
-                    _ => {Err(InvalidPlusOperator)}
+                    _ => {
+                        self.update_span(unary_operator_node.span);
+                        Err(InvalidPlusOperator)}
                 }
             }
             UnaryOperator::Minus => {
@@ -1580,7 +1644,9 @@ impl Interpreter {
                 match value{
                     MemoryValue::Int(i)  => Ok(MemoryValue::Int(-i)),
                     MemoryValue::Float(f) => Ok(MemoryValue::Float(-f)),
-                    _ => {Err(InvalidMinusOperator)}
+                    _ => {
+                        self.update_span(unary_operator_node.span);
+                        Err(InvalidMinusOperator)}
                 }
             }
             UnaryOperator::Negate => {
@@ -1588,7 +1654,9 @@ impl Interpreter {
                 match value{
                     MemoryValue::Int(i)  => Ok(MemoryValue::Int( if i==0 {1} else {0})),
                     MemoryValue::Float(f) => Ok(MemoryValue::Int( if f==0.0 {1} else {0})),
-                    _ => {Err(InvalidNegateOperator)}
+                    _ => {
+                        self.update_span(unary_operator_node.span);
+                        Err(InvalidNegateOperator)}
                 }
             }
             UnaryOperator::PostIncrement => {
@@ -1597,7 +1665,10 @@ impl Interpreter {
                 match value {
                     MemoryValue::Int(value) => self.change_value(&identifier, MemoryValue::Int(value+1))?,
                     MemoryValue::Float(value) => self.change_value(&identifier, MemoryValue::Float(value+1.0))?,
-                    _ => return Err(ImpossibleToIncrement)
+                    _ => {
+                        self.update_span(unary_operator_node.span);
+                        return Err(ImpossibleToIncrement)
+                    }
                 };
                 Ok(value)
             },
@@ -1607,7 +1678,10 @@ impl Interpreter {
                 match value {
                     MemoryValue::Int(value) => self.change_value(&identifier, MemoryValue::Int(value-1))?,
                     MemoryValue::Float(value) => self.change_value(&identifier, MemoryValue::Float(value-1.0))?,
-                    _ => return Err(ImpossibleToIncrement)
+                    _ => {
+                        self.update_span(unary_operator_node.span);
+                        return Err(ImpossibleToIncrement)
+                    }
                 };
                 Ok(value)
             },
@@ -1625,7 +1699,10 @@ impl Interpreter {
                         self.change_value(&identifier, new_value.clone())?;
                         new_value
                     },
-                    _ => return Err(ImpossibleToIncrement)
+                    _ => {
+                        self.update_span(unary_operator_node.span);
+                        return Err(ImpossibleToIncrement)
+                    }
                 };
                 Ok(new_value)
             },
@@ -1643,7 +1720,10 @@ impl Interpreter {
                         self.change_value(&identifier, new_value.clone())?;
                         new_value
                     },
-                    _ => return Err(ImpossibleToIncrement)
+                    _ => {
+                        self.update_span(unary_operator_node.span);
+                        return Err(ImpossibleToIncrement)
+                    }
                 };
                 Ok(new_value)
             },
@@ -1665,6 +1745,7 @@ impl Interpreter {
                     identifier.depth -= 1; //TODP
                     self.get_value(&identifier)
                 }else{
+                    self.update_span(unary_operator_node.span);
                     Err(ImpossibleToGetAddressOfAValue)
                 }
                 
@@ -1673,10 +1754,16 @@ impl Interpreter {
                 let value = self.expression_value(&unary_operator.operand)?;
                 match value {
                     MemoryValue::Pointer(_, index) => Ok(self.memory_manager.memory.get(index).clone()),
-                    _=> Err(IndirectionOnNonPointer)
+                    _=> {
+                        self.update_span(unary_operator_node.span);
+                        Err(IndirectionOnNonPointer)
+                    }
                 }
             },
-            _ => {Err(NotImplemented)}
+            _ => {
+                self.update_span(unary_operator_node.span);
+                Err(NotImplemented)
+            }
         }
         
         
@@ -1688,9 +1775,13 @@ impl Interpreter {
         self.update_span(specifier_quantifier_node.span);
         let specifier_quantifier = &specifier_quantifier_node.node;
         match specifier_quantifier{
-            SpecifierQualifier::TypeSpecifier(node) => SpecifierInterpreter::fromNode(node),
-            SpecifierQualifier::TypeQualifier(_) => Err(NotImplemented),
-            SpecifierQualifier::Extension(_) => Err(NotImplemented)
+            SpecifierQualifier::TypeSpecifier(node) => SpecifierInterpreter::from_node(node),
+            SpecifierQualifier::TypeQualifier(_) => {
+                self.update_span(specifier_quantifier_node.span);
+                Err(NotImplemented)},
+            SpecifierQualifier::Extension(_) => {
+                self.update_span(specifier_quantifier_node.span);
+                Err(NotImplemented)}
         }
 
     }
@@ -1700,6 +1791,7 @@ impl Interpreter {
         self.update_span(type_name_node.span);
         let type_name = &type_name_node.node;
         if type_name.specifiers.is_empty(){
+            self.update_span(type_name_node.span);
             return Err(NotTypeSpecifierInTypeName)
         }else if type_name.specifiers.len() > 1{
             warn!("To many specifer in type name, will only take the first one...");
@@ -1722,7 +1814,7 @@ impl Interpreter {
     fn printf(&self, mut args:Vec<MemoryValue>) -> Result<(), ErrorInterpreter> {
         let inital_string = match args.remove(0) {
             MemoryValue::String(value) => {value}
-            _=> return Err(InvalidArgumentsForPrintf)
+            _=> {return Err(InvalidArgumentsForPrintf)}
         };
         print_c_format(inital_string.clone(), args)?;
         Ok(())
@@ -1734,7 +1826,7 @@ impl Interpreter {
         let identifier = self.expression_identifier(&call_expression.callee)?;
         let arguments: Result<Vec<MemoryValue>, ErrorInterpreter> = call_expression.arguments.iter().map(|node| self.expression_value(&node)).collect();
         if identifier.identifier == "printf"{
-            self.printf(arguments?);
+            self.printf(arguments?)?;
             Ok(MemoryValue::Unit)
         }else {
             self.execute_functions(identifier.identifier, arguments?)
@@ -1761,8 +1853,8 @@ impl Interpreter {
             ast::Expression::Call(call_expression) => self.call_expression(call_expression),
             ast::Expression::StringLiteral(string_literal) => {Ok(MemoryValue::String(string_literal.node.concat()))}
             _=> {
-                println!("{:?}", expression);
                 warn!("Expression not implemented in expression");
+                self.update_span(expression_node.span);
                 Err(NotImplemented)
             }
         }
@@ -1791,7 +1883,7 @@ impl Interpreter {
                 Ok(identifier)
             },
             _ => {
-                println!("{:?}", expression);
+                self.update_span(expression_node.span);
                 Err(NotImplemented)
             }
         }
@@ -1806,6 +1898,7 @@ impl Interpreter {
                 let list_mem_value: Result<Vec<MemoryValue>,ErrorInterpreter> = initializer_list_item.iter().map(|init| self.initializer(&init.node.initializer)).collect();
                 let list_mem_value = list_mem_value?;
                 if list_mem_value.is_empty(){
+                    self.update_span(initializer_node.span);
                     return Err(EmptyDeclarationArray)
                 }
                 let value = list_mem_value[0].get_specifier()?;
@@ -1837,20 +1930,24 @@ impl Interpreter {
         self.update_span(declaration_node.span);
         let declaration = &declaration_node.node;
         //int i;
-        let specifier = SpecifierInterpreter::fromVecDeclaration(&declaration.specifiers)?;
+        let specifier = SpecifierInterpreter::from_vec_declaration(&declaration.specifiers)?;
         let declaration: Vec<(DeclaratorInterpreter, Option<MemoryValue>)> = self.declarators(&declaration.declarators)?;
         for (declarator_interpreter, values) in declaration{
             let local_specifier = declarator_interpreter.to_specifier(specifier.clone())?;
+            self.update_span(declaration_node.span);
             if let Some(values) = values{
                 if !values.same_type_specifier(&local_specifier){
                   error!("Bad type during declaration of variable for {}, {:?} instead of {:?}", declarator_interpreter.identifier.clone(), values, local_specifier);
-                  return Err(IncorrectTypeDeclaration(format!("Bad type during declaration of variable for {}, {:?} instead of {:?}",  declarator_interpreter.identifier.clone(), values, local_specifier)));
+
+                    return Err(IncorrectTypeDeclaration(format!("Bad type during declaration of variable for {}, {:?} instead of {:?}",  declarator_interpreter.identifier.clone(), values, local_specifier)));
                 }
+
                 match values{
                     MemoryValue::Int(_) => {self.memory_manager.create_value(&declarator_interpreter.identifier, values)?;}
                     MemoryValue::Float(_) => {self.memory_manager.create_value(&declarator_interpreter.identifier, values)?;}
                     MemoryValue::Array(inside_type, values) => {
                         if declarator_interpreter.array_sizes[0].ok_or(InvalidValueForArraySize)? != values.len(){
+                            self.update_span(declaration_node.span);
                             return Err(NotSameSizeArrayAndDeclarationOfArray);
                         }
                         match local_specifier {
@@ -1858,6 +1955,7 @@ impl Interpreter {
                               for value in &values{
                                   if !value.same_type_specifier(&*inside_type){
                                       error!("Bad type during declaration of variable for {}, {:?} instead of {:?}", declarator_interpreter.identifier.clone(), value, &*inside_type);
+                                      self.update_span(declaration_node.span);
                                       return Err(IncorrectTypeDeclaration(format!("Bad type during declaration of variable for {}, {:?} instead of {:?}",  declarator_interpreter.identifier.clone(), value, &*inside_type)));
                                   }
                               };
@@ -1891,6 +1989,7 @@ impl Interpreter {
                         }else if declarator_interpreter.n_pointers > 0 && declarator_interpreter.array_sizes.len() == 0{
                             local_specifier.default_value()
                         }else{
+                            self.update_span(declaration_node.span);
                             Err(NotImplemented)
                         }
                     }
@@ -1906,7 +2005,7 @@ impl Interpreter {
         let block_item = &block_item_node.node;
         match block_item {
             ast::BlockItem::Declaration(declaration) => self.declaration(declaration),
-            ast::BlockItem::StaticAssert(static_assert) => Err(ErrorInterpreter::NotImplemented),
+            ast::BlockItem::StaticAssert(_) => Err(ErrorInterpreter::NotImplemented),
             ast::BlockItem::Statement(statement) => self.statement(statement)
         }
     }
@@ -2052,27 +2151,68 @@ fn print_c_format(string: String, values: Vec<MemoryValue>) -> Result<(), ErrorI
 
 
 /// Simple program to greet a person
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
     /// Path to the c file to interpret
-    #[arg(short, long, default_value = "./c_programs/test.c")]
+    #[arg(short, long)]
     path: String,
+
+    /// Print the state of the current part of the code being executed and the memory state of the symbol tables
+    #[arg(short, long)]
+    debug: bool,
+
+    /// When in debug, don't print the source code
+    #[arg(long)]
+    disable_source: bool,
+
+    /// When in debug, don't print the memory state of the symbol tables
+    #[arg(long)]
+    disable_memory: bool,
+
+    /// Press enter between each operation for the interpreter to continue
+    #[arg(short, long)]
+    manually: bool,
+
+    /// Sleep time between each step in auto mod in milliseconds (50 by default)
+    #[arg(short, long)]
+    sleep_time: Option<u32>,
+
 }
 
+fn build_interpreter_from_args(args: &Args) -> Interpreter{
+    if !args.debug && (args.disable_memory || args.manually || args.sleep_time.is_some() || args.disable_source) {
+        warn!("You use debug flag not in debug, they will be ignored");
+    }
+    let debug = if args.debug{
+        if args.sleep_time.is_some() && args.manually {
+            warn!("Sleep time set but you are in manual mode, sleep time will be ignore");
+        };
+        DebugInterpreter {
+            memory_state: !args.disable_memory,
+            source_span: !args.disable_source,
+            print_back: 0,
+            sleep_time: args.sleep_time.unwrap_or_else(|| 50) as usize,
+            auto: !args.manually,
+        }
+    }else{
+        DebugInterpreter {
+            memory_state: false,
+            source_span: false,
+            print_back: 0,
+            sleep_time: 0,
+            auto: true,
+        }
+    };
+    let mut interpreter = Interpreter::new();
+    interpreter.debug = debug;
+    interpreter
+}
 
 fn main() {
     env_logger::init();
     let args = Args::parse();
-    let debug = Debug{
-        memory_state: true,
-        source_span: true,
-        print_back: 0,
-        sleep_time: 500,
-        auto: false,
-    };
-    let mut interpreter = Interpreter::new();
-    interpreter.debug = debug;
+    let mut interpreter = build_interpreter_from_args(&args);
     let res = interpreter.run(args.path);
     println!("{:?}", res);
 }
