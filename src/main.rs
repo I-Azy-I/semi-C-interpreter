@@ -161,6 +161,19 @@ enum MemoryValue {
 }
 
 impl MemoryValue {
+    fn get_string(&self) -> String {
+        match self {
+            MemoryValue::Int(value) => { format!("Int: {}", value) },
+            MemoryValue::Float(value) => { format!("Float: {}", value) }
+            MemoryValue::Char(value) => { format!("{}", value) }
+            //MemoryValue::Array(type_array, array) => {format!("type: {:?}, content: {:?}", type_array, array)}
+            MemoryValue::Pointer(type_pointer, pointer) => { format!("Pointer type: {:?}, address: {:?}", type_pointer, pointer) }
+            MemoryValue::Null => { "null".to_string() },
+            MemoryValue::Unit => { "unit".to_string() },
+            MemoryValue::String(string) => { format!("String: {}", string) },
+            MemoryValue::Array(_, _) => "array (should never be use)".to_string(),
+        }
+    }
     fn same_type_specifier(&self, specifier: &SpecifierInterpreter) -> bool {
         match (self, specifier) {
             (MemoryValue::Int(_), SpecifierInterpreter::Int) => true,
@@ -646,6 +659,7 @@ struct DebugInterpreter {
     source_span: bool,
     print_back: usize,
     sleep_time: usize,
+    print_function_call: bool,
     auto: bool,
 }
 struct Interpreter  {
@@ -654,7 +668,6 @@ struct Interpreter  {
     current_span: Span,
     source: String,
     debug: DebugInterpreter
-
 }
 impl Interpreter {
     fn new() -> Self {
@@ -663,7 +676,7 @@ impl Interpreter {
             memory_manager: MemoryManager::new(),
             current_span: Span::none(),
             source: "".to_string(),
-            debug: DebugInterpreter {memory_state: false, source_span: false, print_back: 0, sleep_time: 500, auto: true }
+            debug: DebugInterpreter {memory_state: false, source_span: false, print_back: 0, sleep_time: 500, print_function_call: false, auto: true }
         }
     }
     fn source_highlight(&self) -> String {
@@ -949,6 +962,15 @@ impl Interpreter {
     }
     fn execute_functions(&mut self, function_identifier: Identifier, variables: Vec<MemoryValue>) -> Result<MemoryValue, ErrorInterpreter> {
         // fetch function data
+        if self.debug.print_function_call {
+            println!("=== Function call  ===");
+            print!("Function: {}, ", function_identifier);
+            print!("Arguments:");
+            for variable in &variables {
+                print!(" {:?} |", variable.get_string());
+            }
+            println!("");
+        }
         let (return_specifier, body) = {
             let (_, return_specifier, function_arguments, body) = self.functions.get(&function_identifier)
                 .ok_or_else(|| FunctionNotFounded(function_identifier.clone()))?;
@@ -1041,9 +1063,9 @@ impl Interpreter {
             }
             Err(err) => {
                 eprintln!("An error occurred during execution");
-                eprintln!("{}", err.error_message());
                 eprintln!("{}", self.source_highlight());
-
+                eprintln!("{}", self.state_memory());
+                eprintln!("{}", err.error_message());
                 MemoryValue::Unit
             }
         }
@@ -1811,7 +1833,16 @@ impl Interpreter {
         value.cast(&specifier)
     }
     
-    fn printf(&self, mut args:Vec<MemoryValue>) -> Result<(), ErrorInterpreter> {
+    fn printf(&self, mut args: Vec<MemoryValue>) -> Result<(), ErrorInterpreter> {
+        if self.debug.print_function_call {
+            println!("=== Function call  ===");
+            print!("Function: printf, ");
+            print!("Arguments:");
+            for variable in &args {
+                print!(" {:?} |", variable.get_string());
+            }
+            println!("");
+        }
         let inital_string = match args.remove(0) {
             MemoryValue::String(value) => {value}
             _=> {return Err(InvalidArgumentsForPrintf)}
@@ -2013,7 +2044,13 @@ impl Interpreter {
         debug!("compound");
         self.memory_manager.push_scope(SymbolTableKind::Scoped);
         for block_item in compound{
-            let _ = self.block_item(&block_item)?;
+            self.block_item(&block_item).map_err(|err| match err {
+                BreakCalled | ReturnCalled(_) => {
+                    self.memory_manager.free_scope();
+                    err
+                },
+                _ => err
+            })?;
         }
         self.memory_manager.free_scope();
         Ok(MemoryValue::Unit)
@@ -2047,22 +2084,26 @@ impl Interpreter {
         let for_statement = &for_statement.node;
         match &for_statement.initializer.node {
             ForInitializer::Empty => {return Err(NotImplemented)},
-            ForInitializer::Expression(expression) => {let _ = self.expression_value(expression);}, 
-            ForInitializer::Declaration(declaration) => {self.declaration(&declaration)?;}
+            ForInitializer::Expression(expression) => {
+                let _ = self.expression_value(expression)?;},
+            ForInitializer::Declaration(declaration) => {
+                let _ = self.declaration(&declaration)?;}
             ForInitializer::StaticAssert(_) => {return Err(NotImplemented)}
         }
         while self.expression_value(for_statement.condition.as_ref().ok_or(ForConditionNotDefined)?)?.evaluate_boolean_value()? {
             self.memory_manager.push_scope(SymbolTableKind::Scoped);
             let res_statement = self.statement(&*for_statement.statement);
             if !res_statement.is_ok() {
+                self.memory_manager.free_scope();
                 if let Err(BreakCalled) = res_statement{
-                    self.memory_manager.free_scope();
                     break;
-                }else { 
+                }else {
+                    self.memory_manager.free_scope();
                     return res_statement;
                 }
             }
-            self.expression_value(for_statement.step.as_ref().ok_or(ForStepNotDefined)?)?;
+            let step = for_statement.step.as_ref().ok_or(ForStepNotDefined)?;
+            let expr = self.expression_value(step)?;
             self.memory_manager.free_scope();
         }
         self.memory_manager.free_scope();
@@ -2073,15 +2114,14 @@ impl Interpreter {
         debug!("for_statement");
         self.update_span(while_statement_node.span);
         let while_statement = &while_statement_node.node;
-        
         while self.expression_value(&while_statement.expression)?.evaluate_boolean_value()? {
             self.memory_manager.push_scope(SymbolTableKind::Scoped);
             let res_statement = self.statement(&*while_statement.statement);
             if !res_statement.is_ok() {
                 if let Err(BreakCalled) = res_statement{
-                    self.memory_manager.free_scope();
                     break;
                 }else {
+                    self.memory_manager.free_scope();
                     return res_statement;
                 }
             }
@@ -2178,11 +2218,18 @@ struct Args {
     #[arg(short, long)]
     sleep_time: Option<u32>,
 
+    /// Print function call
+    #[arg(long)]
+    print_function_call: bool,
+
 }
 
 fn build_interpreter_from_args(args: &Args) -> Interpreter{
     if !args.debug && (args.disable_memory || args.manually || args.sleep_time.is_some() || args.disable_source) {
         warn!("You use debug flag not in debug, they will be ignored");
+    }
+    if args.debug && args.print_function_call {
+        warn!("Cannot print function call when in debug mod");
     }
     let debug = if args.debug{
         if args.sleep_time.is_some() && args.manually {
@@ -2193,7 +2240,9 @@ fn build_interpreter_from_args(args: &Args) -> Interpreter{
             source_span: !args.disable_source,
             print_back: 0,
             sleep_time: args.sleep_time.unwrap_or_else(|| 50) as usize,
+            print_function_call: false,
             auto: !args.manually,
+
         }
     }else{
         DebugInterpreter {
@@ -2201,7 +2250,9 @@ fn build_interpreter_from_args(args: &Args) -> Interpreter{
             source_span: false,
             print_back: 0,
             sleep_time: 0,
+            print_function_call: args.print_function_call,
             auto: true,
+
         }
     };
     let mut interpreter = Interpreter::new();
@@ -2214,7 +2265,7 @@ fn main() {
     let args = Args::parse();
     let mut interpreter = build_interpreter_from_args(&args);
     let res = interpreter.run(args.path);
-    println!("{:?}", res);
+    //println!("{:?}", res);
 }
 
 #[cfg(test)]
@@ -2282,12 +2333,11 @@ mod tests {
     }
 
     #[test]
-    fn pointers(){
+    fn nested_return(){
         let mut interpreter = Interpreter::new();
-        let res = interpreter.run("./c_programs/tests/pointers.c");
-        assert_eq!(res, MemoryValue::Float(45.0));
+        let res = interpreter.run("./c_programs/tests/test_nested_return.c");
+        assert_eq!(res, MemoryValue::Int(5));
     }
-    
 }
 
 

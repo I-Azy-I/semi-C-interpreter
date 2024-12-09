@@ -1,5 +1,5 @@
 # semi-c interpreter
-## Using
+## Usage
 ### Rust
 To build and run you need to have rust installed. You can use the rustup toolchain installer to install rust:
 
@@ -20,19 +20,23 @@ the binary is ``./target/release/semi-C-interpreter``
 ```bash
 ./semi-C-interpreter -p <PATH>
 ```
+the example of the course with the function call printed
+```bash
+cargo run -- -p c_programs/slides_examples/course_example.c --print-function-call
+```
 #### Debug
-There is two ways 2 kind of debug. The one from the logging and if you want to see the flow in live.
+There is two kinds of debug. The one from the logging and if you want to see the flow in live.
 ##### Logging
 Set the environment variable ``RUST_LOG`` to ``debug``
 ```bash
 # for linux
 export RUST_LOG=debug 
 ```
-But this feature only enable the debug logs which are not interesting.
+But this feature only enable the debug logs which are not interesting
 ##### Display flow
 > Be sure not to have activated the logs
 
-If you want to use see the flow in live add ``-d`` to the command line.
+If you want to use see the flow in live add ``-d`` to the command line
 
 ```bash
 ./semi-C-interpreter -p <PATH> -d
