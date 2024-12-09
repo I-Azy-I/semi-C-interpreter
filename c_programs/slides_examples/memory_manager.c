@@ -17,4 +17,5 @@ int main(){
     {
         foo(0, 3);
     }
+    return 0;
 }
