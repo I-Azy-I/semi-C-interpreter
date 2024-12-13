@@ -1045,13 +1045,13 @@ impl Interpreter {
             self.functions.insert(function.0.clone(), function);
         }
         info!("functions saved");
-        let (_main_identifier, _main_return_specifier,  _main_arguments, main_body) = if let Some(main) = self.functions.get("main"){
+        let (_main_identifier, main_return_specifier,  _main_arguments, main_body) = if let Some(main) = self.functions.get("main"){
             main
         }else{
             error!("No main function as been founded");
             panic!("No main function");
         };
-
+        let main_return_specifier = main_return_specifier.clone();
         //TODO use main arguments???
         info!("Running main");
         let result = self.statement(&main_body.clone())
@@ -1064,7 +1064,17 @@ impl Interpreter {
         debug!("{}", self.memory_manager.build_state());
         match result {
             Ok(value) => {
+                let value = match value {
+                    MemoryValue::Unit => {MemoryValue::Int(0)}
+                    _ => {value}
+                };
                 info!("Program completed successfully");
+                println!("Program completed successfully");
+                if  main_return_specifier == SpecifierInterpreter::Void || value.same_type_specifier(&main_return_specifier) {
+                    println!("Return value: '{}'", value.get_string());
+                } else {
+                    println!("Return value with wrong type: '{}' instead of {:?}", value.get_string(), main_return_specifier);
+                }
                 value
             }
             Err(err) => {
@@ -1075,6 +1085,7 @@ impl Interpreter {
                 MemoryValue::Unit
             }
         }
+
 
     }
     
