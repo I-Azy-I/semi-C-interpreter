@@ -2217,7 +2217,7 @@ fn print_c_format(string: String, values: Vec<MemoryValue>) -> Result<(), ErrorI
 }
 
 
-/// Simple program to greet a person
+/// An interpreter for a subset of C
 #[derive(Parser)]
 #[command(version, about, long_about = None)]
 struct Args {
