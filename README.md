@@ -24,6 +24,10 @@ the example of the course with the function call printed
 ```bash
 cargo run -- -p c_programs/slides_examples/course_example.c --print-function-call
 ```
+show the execution of the code in live
+```bash
+cargo run -- -p c_programs/slides_examples/course_example.c -d
+```
 #### Debug
 There is two kinds of debug. The one from the logging and if you want to see the flow in live.
 ##### Logging
