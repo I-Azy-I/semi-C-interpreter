@@ -1,4 +1,5 @@
 # semi-c interpreter
+Term project for CS420 of KAIST
 ## Usage
 ### Rust
 To build and run you need to have rust installed. You can use the rustup toolchain installer to install rust:
