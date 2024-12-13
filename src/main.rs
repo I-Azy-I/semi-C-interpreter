@@ -1,4 +1,4 @@
-use lang_c::driver::{parse, Config};
+use lang_c::driver::{parse, Config, Error, Parse};
 use std::collections::HashMap;
 use std::hash::Hash;
 use lang_c::span::{Node, Span};
@@ -1019,7 +1019,13 @@ impl Interpreter {
     fn run<P: AsRef<Path>> (&mut self, file_name: P) -> MemoryValue {
         let config = Config::default();
         info!("Parsing file: {} ...", file_name.as_ref().display());
-        let parse = parse(&config, file_name).expect("Error in file c");
+        let parse = match parse(&config, file_name){
+            Ok(parse) => parse,
+            Err(_error) => {
+                eprintln!("Parsing failed, there is an error in your c code");
+                return MemoryValue::Unit;
+            }
+        };
         self.source = parse.source;
         let translation_unit = parse.unit;
         let functions = translation_unit.0;
@@ -2136,8 +2142,18 @@ impl Interpreter {
         let statement = &statement.node;
         let value = match statement {
             ast::Statement::Compound(comp) => self.compound(comp),
-            ast::Statement::Expression(expression) => self.expression_value(expression.as_ref().unwrap()),
-            ast::Statement::Return(expression) => Err(ReturnCalled(self.expression_value(expression.as_ref().unwrap())?)),
+            ast::Statement::Expression(expression) => {
+                match expression.as_ref(){
+                    None => { Ok(MemoryValue::Unit)}
+                    Some(expr) => {self.expression_value(expr)}
+                }
+            },
+            ast::Statement::Return(expression) => Err(ReturnCalled(
+                match expression.as_ref(){
+                    None => {MemoryValue::Unit}
+                    Some(expr) => {self.expression_value(expr)?}
+                }
+            )),
             ast::Statement::If(node_if) => self.if_statement(node_if),
             ast::Statement::For(for_statement_node) => self.for_statement(for_statement_node),
             ast::Statement::While(while_statement_node) => self.while_statement(while_statement_node),

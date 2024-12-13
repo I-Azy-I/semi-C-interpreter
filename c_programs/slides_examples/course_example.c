@@ -22,4 +22,6 @@ int main(void) {
         printf("%f\n", average);
     }
   }
+
+
 }
