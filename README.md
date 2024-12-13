@@ -40,6 +40,8 @@ But this feature only enable the debug logs which are not interesting
 ##### Display flow
 > Be sure not to have activated the logs
 
+> It may not work in every terminal, some of them cannot reprint the source code on the previous one
+
 If you want to use see the flow in live add ``-d`` to the command line
 
 ```bash
